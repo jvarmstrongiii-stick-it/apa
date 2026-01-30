@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "Bash(npx create-expo-app@latest:*)",
+      "Bash(npm install:*)",
+      "Bash(python3:*)",
+      "Bash(ls:*)"
+    ]
+  }
+}
