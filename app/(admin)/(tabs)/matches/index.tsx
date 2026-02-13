@@ -10,6 +10,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { router, useFocusEffect } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { theme } from '../../../../src/constants/theme';
+import { supabase } from '../../../../src/lib/supabase';
 
 type MatchStatus = 'scheduled' | 'lineup_set' | 'in_progress' | 'completed' | 'disputed' | 'finalized';
 
@@ -42,43 +43,6 @@ const STATUS_LABELS: Record<MatchStatus, string> = {
   disputed: 'Disputed',
   finalized: 'Finalized',
 };
-
-// TODO: Replace with actual API data
-const PLACEHOLDER_MATCHES: TeamMatch[] = [
-  {
-    id: '1',
-    home_team_name: 'Rack Attack',
-    away_team_name: 'Cue Ballers',
-    scheduled_date: '2026-02-03T19:00:00Z',
-    status: 'in_progress',
-    home_score: 8,
-    away_score: 5,
-    league_name: 'Monday 8-Ball',
-    division_name: 'Division A',
-  },
-  {
-    id: '2',
-    home_team_name: 'Break Masters',
-    away_team_name: 'Side Pockets',
-    scheduled_date: '2026-02-03T19:00:00Z',
-    status: 'scheduled',
-    home_score: null,
-    away_score: null,
-    league_name: 'Monday 8-Ball',
-    division_name: 'Division B',
-  },
-  {
-    id: '3',
-    home_team_name: 'Scratch That',
-    away_team_name: 'Masse Effect',
-    scheduled_date: '2026-01-27T19:00:00Z',
-    status: 'disputed',
-    home_score: 10,
-    away_score: 10,
-    league_name: 'Wednesday 9-Ball',
-    division_name: 'Division A',
-  },
-];
 
 const FILTER_OPTIONS: { label: string; value: MatchStatus | 'all' }[] = [
   { label: 'All', value: 'all' },
@@ -152,21 +116,46 @@ function MatchItem({ match }: { match: TeamMatch }) {
 }
 
 export default function AdminMatchesIndex() {
-  const [matches, setMatches] = useState<TeamMatch[]>(PLACEHOLDER_MATCHES);
+  const [matches, setMatches] = useState<TeamMatch[]>([]);
   const [activeFilter, setActiveFilter] = useState<MatchStatus | 'all'>('all');
   const [refreshing, setRefreshing] = useState(false);
 
+  const fetchMatches = useCallback(async () => {
+    const { data, error } = await supabase
+      .from('team_matches')
+      .select('*, home_team:teams!home_team_id(name, division_id), away_team:teams!away_team_id(name), division:divisions!division_id(name, league:leagues!league_id(name))')
+      .order('match_date', { ascending: false })
+      .limit(50);
+
+    if (error) {
+      console.error('Failed to fetch matches:', error.message);
+      return;
+    }
+
+    const mapped: TeamMatch[] = (data ?? []).map((m: any) => ({
+      id: m.id,
+      home_team_name: m.home_team?.name ?? 'Unknown',
+      away_team_name: m.away_team?.name ?? 'Unknown',
+      scheduled_date: m.match_date,
+      status: m.status as MatchStatus,
+      home_score: m.home_score,
+      away_score: m.away_score,
+      league_name: m.division?.league?.name ?? '',
+      division_name: m.division?.name ?? '',
+    }));
+    setMatches(mapped);
+  }, []);
+
   useFocusEffect(
     useCallback(() => {
-      // TODO: Fetch matches from API on focus
-    }, [])
+      fetchMatches();
+    }, [fetchMatches])
   );
 
   const handleRefresh = async () => {
     setRefreshing(true);
     try {
-      // TODO: Fetch matches from API
-      await new Promise((resolve) => setTimeout(resolve, 500));
+      await fetchMatches();
     } finally {
       setRefreshing(false);
     }

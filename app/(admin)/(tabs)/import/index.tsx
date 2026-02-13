@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useCallback } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -9,9 +9,10 @@ import {
   View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { router } from 'expo-router';
+import { router, useFocusEffect } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { theme } from '../../../../src/constants/theme';
+import { supabase } from '../../../../src/lib/supabase';
 
 type ImportStatus = 'processing' | 'completed' | 'failed' | 'partial';
 
@@ -38,37 +39,6 @@ const STATUS_LABELS: Record<ImportStatus, string> = {
   failed: 'Failed',
   partial: 'Partial',
 };
-
-// TODO: Replace with actual data
-const PLACEHOLDER_IMPORTS: ImportRecord[] = [
-  {
-    id: '1',
-    filename: 'spring_2026_rosters.pdf',
-    uploaded_at: '2026-01-28T14:30:00Z',
-    status: 'completed',
-    total_rows: 48,
-    success_count: 48,
-    error_count: 0,
-  },
-  {
-    id: '2',
-    filename: 'division_b_update.pdf',
-    uploaded_at: '2026-01-25T10:15:00Z',
-    status: 'partial',
-    total_rows: 24,
-    success_count: 20,
-    error_count: 4,
-  },
-  {
-    id: '3',
-    filename: 'new_players.pdf',
-    uploaded_at: '2026-01-20T09:00:00Z',
-    status: 'failed',
-    total_rows: 12,
-    success_count: 0,
-    error_count: 12,
-  },
-];
 
 function ImportItem({ item }: { item: ImportRecord }) {
   const uploadDate = new Date(item.uploaded_at);
@@ -140,9 +110,39 @@ function ImportItem({ item }: { item: ImportRecord }) {
 }
 
 export default function AdminImportIndex() {
-  const [imports, setImports] = useState<ImportRecord[]>(PLACEHOLDER_IMPORTS);
+  const [imports, setImports] = useState<ImportRecord[]>([]);
   const [isUploading, setIsUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
+
+  const fetchImports = useCallback(async () => {
+    const { data, error } = await supabase
+      .from('imports')
+      .select('*')
+      .order('created_at', { ascending: false })
+      .limit(50);
+
+    if (error) {
+      console.error('Failed to fetch imports:', error.message);
+      return;
+    }
+
+    const mapped: ImportRecord[] = (data ?? []).map((i: any) => ({
+      id: i.id,
+      filename: i.file_name,
+      uploaded_at: i.created_at,
+      status: i.status === 'completed' && i.error_rows > 0 ? 'partial' : i.status,
+      total_rows: i.total_rows ?? 0,
+      success_count: i.processed_rows ?? 0,
+      error_count: i.error_rows ?? 0,
+    }));
+    setImports(mapped);
+  }, []);
+
+  useFocusEffect(
+    useCallback(() => {
+      fetchImports();
+    }, [fetchImports])
+  );
 
   const handleSelectDocument = async () => {
     try {

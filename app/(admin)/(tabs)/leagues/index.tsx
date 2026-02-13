@@ -10,47 +10,17 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { router, useFocusEffect } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { theme } from '../../../../src/constants/theme';
+import { supabase } from '../../../../src/lib/supabase';
 
 interface League {
   id: string;
   name: string;
-  game_format: '8-ball' | '9-ball';
+  game_format: string;
   season: string;
   year: number;
   is_active: boolean;
   team_count: number;
 }
-
-// TODO: Replace with actual API call
-const PLACEHOLDER_LEAGUES: League[] = [
-  {
-    id: '1',
-    name: 'Monday 8-Ball',
-    game_format: '8-ball',
-    season: 'Spring',
-    year: 2026,
-    is_active: true,
-    team_count: 12,
-  },
-  {
-    id: '2',
-    name: 'Wednesday 9-Ball',
-    game_format: '9-ball',
-    season: 'Spring',
-    year: 2026,
-    is_active: true,
-    team_count: 8,
-  },
-  {
-    id: '3',
-    name: 'Thursday 8-Ball',
-    game_format: '8-ball',
-    season: 'Fall',
-    year: 2025,
-    is_active: false,
-    team_count: 10,
-  },
-];
 
 function LeagueItem({ league }: { league: League }) {
   return (
@@ -112,20 +82,44 @@ function LeagueItem({ league }: { league: League }) {
 }
 
 export default function AdminLeaguesIndex() {
-  const [leagues, setLeagues] = useState<League[]>(PLACEHOLDER_LEAGUES);
+  const [leagues, setLeagues] = useState<League[]>([]);
   const [refreshing, setRefreshing] = useState(false);
+
+  const fetchLeagues = useCallback(async () => {
+    const { data, error } = await supabase
+      .from('leagues')
+      .select('*, divisions(id)')
+      .order('is_active', { ascending: false })
+      .order('year', { ascending: false })
+      .order('name');
+
+    if (error) {
+      console.error('Failed to fetch leagues:', error.message);
+      return;
+    }
+
+    const mapped: League[] = (data ?? []).map((l: any) => ({
+      id: l.id,
+      name: l.name,
+      game_format: l.game_format,
+      season: l.season,
+      year: l.year,
+      is_active: l.is_active,
+      team_count: Array.isArray(l.divisions) ? l.divisions.length : 0,
+    }));
+    setLeagues(mapped);
+  }, []);
 
   useFocusEffect(
     useCallback(() => {
-      // TODO: Fetch leagues from API on focus
-    }, [])
+      fetchLeagues();
+    }, [fetchLeagues])
   );
 
   const handleRefresh = async () => {
     setRefreshing(true);
     try {
-      // TODO: Fetch leagues from API
-      await new Promise((resolve) => setTimeout(resolve, 500));
+      await fetchLeagues();
     } finally {
       setRefreshing(false);
     }

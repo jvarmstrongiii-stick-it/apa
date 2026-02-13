@@ -1,5 +1,6 @@
 import { Tabs } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { theme } from '../../../src/constants/theme';
 
 type IoniconsName = keyof typeof Ionicons.glyphMap;
@@ -15,6 +16,7 @@ function TabIcon({ name, color, size }: TabIconProps) {
 }
 
 export default function TeamTabsLayout() {
+  const insets = useSafeAreaInsets();
   return (
     <Tabs
       screenOptions={{
@@ -25,8 +27,8 @@ export default function TeamTabsLayout() {
           backgroundColor: '#1A1A1A',
           borderTopColor: theme.colors.border,
           borderTopWidth: 1,
-          height: 88,
-          paddingBottom: 24,
+          height: 64 + insets.bottom,
+          paddingBottom: insets.bottom,
           paddingTop: 8,
         },
         tabBarLabelStyle: {

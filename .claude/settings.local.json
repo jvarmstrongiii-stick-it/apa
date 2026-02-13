@@ -5,7 +5,9 @@
       "Bash(npx create-expo-app@latest:*)",
       "Bash(npm install:*)",
       "Bash(python3:*)",
-      "Bash(ls:*)"
+      "Bash(ls:*)",
+      "Bash(npx tsc:*)",
+      "Bash(npx expo install expo-updates)"
     ]
   }
 }

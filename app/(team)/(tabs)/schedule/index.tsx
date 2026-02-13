@@ -10,6 +10,8 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { useFocusEffect } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { theme } from '../../../../src/constants/theme';
+import { supabase } from '../../../../src/lib/supabase';
+import { useAuthContext } from '../../../../src/providers/AuthProvider';
 
 type MatchStatus = 'scheduled' | 'lineup_set' | 'in_progress' | 'completed' | 'finalized';
 
@@ -39,50 +41,6 @@ const STATUS_LABELS: Record<MatchStatus, string> = {
   completed: 'Completed',
   finalized: 'Finalized',
 };
-
-// TODO: Replace with actual API data
-const PLACEHOLDER_SCHEDULE: ScheduleMatch[] = [
-  {
-    id: '1',
-    opponent_name: 'Cue Ballers',
-    scheduled_date: '2026-02-03T19:00:00Z',
-    status: 'scheduled',
-    is_home: true,
-    home_score: null,
-    away_score: null,
-    location: "Sharkey's Billiards",
-  },
-  {
-    id: '2',
-    opponent_name: 'Break Masters',
-    scheduled_date: '2026-02-10T19:00:00Z',
-    status: 'scheduled',
-    is_home: false,
-    home_score: null,
-    away_score: null,
-    location: "Fast Eddie's",
-  },
-  {
-    id: '3',
-    opponent_name: 'Side Pockets',
-    scheduled_date: '2026-01-27T19:00:00Z',
-    status: 'finalized',
-    is_home: true,
-    home_score: 13,
-    away_score: 7,
-    location: "Sharkey's Billiards",
-  },
-  {
-    id: '4',
-    opponent_name: 'Masse Effect',
-    scheduled_date: '2026-01-20T19:00:00Z',
-    status: 'finalized',
-    is_home: false,
-    home_score: 9,
-    away_score: 11,
-    location: 'Billiards Club',
-  },
-];
 
 function ScheduleItem({ match }: { match: ScheduleMatch }) {
   const matchDate = new Date(match.scheduled_date);
@@ -163,20 +121,51 @@ function ScheduleItem({ match }: { match: ScheduleMatch }) {
 }
 
 export default function TeamScheduleIndex() {
-  const [schedule, setSchedule] = useState<ScheduleMatch[]>(PLACEHOLDER_SCHEDULE);
+  const { profile } = useAuthContext();
+  const teamId = profile?.team_id;
+  const [schedule, setSchedule] = useState<ScheduleMatch[]>([]);
   const [refreshing, setRefreshing] = useState(false);
+
+  const fetchSchedule = useCallback(async () => {
+    if (!teamId) return;
+
+    const { data, error } = await supabase
+      .from('team_matches')
+      .select('id, match_date, status, home_score, away_score, home_team_id, away_team_id, home_team:teams!home_team_id(name), away_team:teams!away_team_id(name), division:divisions!division_id(location)')
+      .or(`home_team_id.eq.${teamId},away_team_id.eq.${teamId}`)
+      .order('match_date', { ascending: true });
+
+    if (error) {
+      console.error('Failed to fetch schedule:', error.message);
+      return;
+    }
+
+    const mapped: ScheduleMatch[] = (data ?? []).map((m: any) => {
+      const isHome = m.home_team_id === teamId;
+      return {
+        id: m.id,
+        opponent_name: isHome ? (m.away_team?.name ?? 'Unknown') : (m.home_team?.name ?? 'Unknown'),
+        scheduled_date: m.match_date,
+        status: m.status as MatchStatus,
+        is_home: isHome,
+        home_score: m.home_score,
+        away_score: m.away_score,
+        location: m.division?.location ?? '',
+      };
+    });
+    setSchedule(mapped);
+  }, [teamId]);
 
   useFocusEffect(
     useCallback(() => {
-      // TODO: Fetch schedule from API on focus
-    }, [])
+      fetchSchedule();
+    }, [fetchSchedule])
   );
 
   const handleRefresh = async () => {
     setRefreshing(true);
     try {
-      // TODO: Fetch schedule from API
-      await new Promise((resolve) => setTimeout(resolve, 500));
+      await fetchSchedule();
     } finally {
       setRefreshing(false);
     }

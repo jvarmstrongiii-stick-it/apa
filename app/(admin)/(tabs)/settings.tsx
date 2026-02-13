@@ -13,10 +13,16 @@ import { router } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { theme } from '../../../src/constants/theme';
 import { useAuthContext } from '../../../src/providers/AuthProvider';
+import Constants from 'expo-constants';
 
-// TODO: Get actual app version from expo-constants
-const APP_VERSION = '1.0.0';
-const BUILD_NUMBER = '1';
+const APP_VERSION = Constants.expoConfig?.version ?? '1.0.0';
+const BUILD_NUMBER =
+  Constants.expoConfig?.ios?.buildNumber ??
+  Constants.expoConfig?.android?.versionCode?.toString() ??
+  '1';
+const ENVIRONMENT = Constants.expoConfig?.extra?.eas?.projectId
+  ? __DEV__ ? 'Development' : 'Production'
+  : 'Development';
 
 export default function AdminSettingsScreen() {
   const { signOut, user } = useAuthContext();
@@ -79,7 +85,6 @@ export default function AdminSettingsScreen() {
               <View>
                 <Text style={styles.settingLabel}>Signed in as</Text>
                 <Text style={styles.settingValue}>
-                  {/* TODO: Use actual user email */}
                   {user?.email ?? 'admin@example.com'}
                 </Text>
               </View>
@@ -130,8 +135,7 @@ export default function AdminSettingsScreen() {
               <Text style={styles.settingLabel}>Environment</Text>
             </View>
             <Text style={styles.settingValueRight}>
-              {/* TODO: Get from config */}
-              Development
+              {ENVIRONMENT}
             </Text>
           </View>
         </View>

@@ -9,6 +9,8 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { useFocusEffect } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { theme } from '../../../../src/constants/theme';
+import { supabase } from '../../../../src/lib/supabase';
+import { useAuthContext } from '../../../../src/providers/AuthProvider';
 
 interface Player {
   id: string;
@@ -19,18 +21,6 @@ interface Player {
   losses: number;
   is_captain: boolean;
 }
-
-// TODO: Replace with actual API data
-const PLACEHOLDER_PLAYERS: Player[] = [
-  { id: 'p1', name: 'John Doe', skill_level: 5, games_played: 10, wins: 7, losses: 3, is_captain: true },
-  { id: 'p2', name: 'Sarah Lee', skill_level: 3, games_played: 8, wins: 5, losses: 3, is_captain: false },
-  { id: 'p3', name: 'Tom Rogers', skill_level: 4, games_played: 9, wins: 6, losses: 3, is_captain: false },
-  { id: 'p4', name: 'Lisa Martin', skill_level: 6, games_played: 10, wins: 6, losses: 4, is_captain: false },
-  { id: 'p5', name: 'Bob Nelson', skill_level: 5, games_played: 7, wins: 4, losses: 3, is_captain: false },
-  { id: 'p6', name: 'Amy Kim', skill_level: 3, games_played: 6, wins: 4, losses: 2, is_captain: false },
-  { id: 'p7', name: 'Dave Wilson', skill_level: 4, games_played: 8, wins: 3, losses: 5, is_captain: false },
-  { id: 'p8', name: 'Jane Foster', skill_level: 2, games_played: 5, wins: 2, losses: 3, is_captain: false },
-];
 
 function PlayerCard({ player }: { player: Player }) {
   const winPct =
@@ -90,20 +80,47 @@ function PlayerCard({ player }: { player: Player }) {
 }
 
 export default function TeamRosterIndex() {
-  const [players, setPlayers] = useState<Player[]>(PLACEHOLDER_PLAYERS);
+  const { profile } = useAuthContext();
+  const teamId = profile?.team_id;
+  const [players, setPlayers] = useState<Player[]>([]);
   const [refreshing, setRefreshing] = useState(false);
+
+  const fetchRoster = useCallback(async () => {
+    if (!teamId) return;
+
+    const { data, error } = await supabase
+      .from('team_players')
+      .select('id, is_captain, player:players!player_id(id, first_name, last_name, skill_level)')
+      .eq('team_id', teamId)
+      .is('left_at', null);
+
+    if (error) {
+      console.error('Failed to fetch roster:', error.message);
+      return;
+    }
+
+    const mapped: Player[] = (data ?? []).map((tp: any) => ({
+      id: tp.player?.id ?? tp.id,
+      name: `${tp.player?.first_name ?? ''} ${tp.player?.last_name ?? ''}`.trim(),
+      skill_level: tp.player?.skill_level ?? 0,
+      games_played: 0,
+      wins: 0,
+      losses: 0,
+      is_captain: tp.is_captain,
+    }));
+    setPlayers(mapped);
+  }, [teamId]);
 
   useFocusEffect(
     useCallback(() => {
-      // TODO: Fetch roster from API
-    }, [])
+      fetchRoster();
+    }, [fetchRoster])
   );
 
   const handleRefresh = async () => {
     setRefreshing(true);
     try {
-      // TODO: Fetch roster from API
-      await new Promise((resolve) => setTimeout(resolve, 500));
+      await fetchRoster();
     } finally {
       setRefreshing(false);
     }

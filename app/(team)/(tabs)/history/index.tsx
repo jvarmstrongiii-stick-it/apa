@@ -10,6 +10,8 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { useFocusEffect } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { theme } from '../../../../src/constants/theme';
+import { supabase } from '../../../../src/lib/supabase';
+import { useAuthContext } from '../../../../src/providers/AuthProvider';
 
 interface HistoryMatch {
   id: string;
@@ -21,60 +23,6 @@ interface HistoryMatch {
   result: 'win' | 'loss' | 'tie';
   game_format: '8-ball' | '9-ball';
 }
-
-// TODO: Replace with actual API data
-const PLACEHOLDER_HISTORY: HistoryMatch[] = [
-  {
-    id: '1',
-    opponent_name: 'Side Pockets',
-    match_date: '2026-01-27T19:00:00Z',
-    is_home: true,
-    home_score: 13,
-    away_score: 7,
-    result: 'win',
-    game_format: '8-ball',
-  },
-  {
-    id: '2',
-    opponent_name: 'Masse Effect',
-    match_date: '2026-01-20T19:00:00Z',
-    is_home: false,
-    home_score: 9,
-    away_score: 11,
-    result: 'win',
-    game_format: '8-ball',
-  },
-  {
-    id: '3',
-    opponent_name: 'Break Masters',
-    match_date: '2026-01-13T19:00:00Z',
-    is_home: true,
-    home_score: 8,
-    away_score: 12,
-    result: 'loss',
-    game_format: '8-ball',
-  },
-  {
-    id: '4',
-    opponent_name: 'Scratch That',
-    match_date: '2026-01-06T19:00:00Z',
-    is_home: false,
-    home_score: 10,
-    away_score: 10,
-    result: 'tie',
-    game_format: '8-ball',
-  },
-  {
-    id: '5',
-    opponent_name: 'Cue Ballers',
-    match_date: '2025-12-30T19:00:00Z',
-    is_home: true,
-    home_score: 14,
-    away_score: 6,
-    result: 'win',
-    game_format: '8-ball',
-  },
-];
 
 const RESULT_COLORS = {
   win: '#4CAF50',
@@ -168,20 +116,61 @@ function HistoryItem({ match }: { match: HistoryMatch }) {
 }
 
 export default function TeamHistoryIndex() {
-  const [history, setHistory] = useState<HistoryMatch[]>(PLACEHOLDER_HISTORY);
+  const { profile } = useAuthContext();
+  const teamId = profile?.team_id;
+  const [history, setHistory] = useState<HistoryMatch[]>([]);
   const [refreshing, setRefreshing] = useState(false);
+
+  const fetchHistory = useCallback(async () => {
+    if (!teamId) return;
+
+    const { data, error } = await supabase
+      .from('team_matches')
+      .select('id, match_date, status, home_score, away_score, home_team_id, away_team_id, home_team:teams!home_team_id(name), away_team:teams!away_team_id(name), division:divisions!division_id(league:leagues!league_id(game_format))')
+      .or(`home_team_id.eq.${teamId},away_team_id.eq.${teamId}`)
+      .in('status', ['completed', 'finalized'])
+      .order('match_date', { ascending: false });
+
+    if (error) {
+      console.error('Failed to fetch history:', error.message);
+      return;
+    }
+
+    const mapped: HistoryMatch[] = (data ?? []).map((m: any) => {
+      const isHome = m.home_team_id === teamId;
+      const ourScore = isHome ? (m.home_score ?? 0) : (m.away_score ?? 0);
+      const theirScore = isHome ? (m.away_score ?? 0) : (m.home_score ?? 0);
+      const gameFormat = m.division?.league?.game_format === 'nine_ball' ? '9-ball' : '8-ball';
+
+      let result: 'win' | 'loss' | 'tie';
+      if (ourScore > theirScore) result = 'win';
+      else if (ourScore < theirScore) result = 'loss';
+      else result = 'tie';
+
+      return {
+        id: m.id,
+        opponent_name: isHome ? (m.away_team?.name ?? 'Unknown') : (m.home_team?.name ?? 'Unknown'),
+        match_date: m.match_date,
+        is_home: isHome,
+        home_score: m.home_score ?? 0,
+        away_score: m.away_score ?? 0,
+        result,
+        game_format: gameFormat as '8-ball' | '9-ball',
+      };
+    });
+    setHistory(mapped);
+  }, [teamId]);
 
   useFocusEffect(
     useCallback(() => {
-      // TODO: Fetch match history from API
-    }, [])
+      fetchHistory();
+    }, [fetchHistory])
   );
 
   const handleRefresh = async () => {
     setRefreshing(true);
     try {
-      // TODO: Fetch match history from API
-      await new Promise((resolve) => setTimeout(resolve, 500));
+      await fetchHistory();
     } finally {
       setRefreshing(false);
     }

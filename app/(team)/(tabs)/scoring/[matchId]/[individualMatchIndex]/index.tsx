@@ -11,6 +11,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { router, useLocalSearchParams } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { theme } from '../../../../../../src/constants/theme';
+import { supabase } from '../../../../../../src/lib/supabase';
 
 type GameFormat = '8-ball' | '9-ball';
 
@@ -60,22 +61,68 @@ export default function IndividualMatchScoringScreen() {
 
   const matchIndex = parseInt(individualMatchIndex ?? '0');
 
-  // TODO: Fetch actual match data from API/store
-  const gameFormat: GameFormat = '8-ball'; // Determine from match data
+  const [gameFormat, setGameFormat] = useState<GameFormat>('8-ball');
+  const [individualMatchId, setIndividualMatchId] = useState<string | null>(null);
 
-  const [homePlayer] = useState<PlayerInfo>({
-    name: 'John Doe',
-    skill_level: 5,
-    race_to: EIGHT_BALL_RACE[5] ?? 3,
-    target_points: NINE_BALL_TARGETS[5] ?? 38,
+  const [homePlayer, setHomePlayer] = useState<PlayerInfo>({
+    name: 'Home Player',
+    skill_level: 3,
+    race_to: EIGHT_BALL_RACE[3] ?? 2,
+    target_points: NINE_BALL_TARGETS[3] ?? 25,
   });
 
-  const [awayPlayer] = useState<PlayerInfo>({
-    name: 'Mike Smith',
-    skill_level: 4,
-    race_to: EIGHT_BALL_RACE[4] ?? 3,
-    target_points: NINE_BALL_TARGETS[4] ?? 31,
+  const [awayPlayer, setAwayPlayer] = useState<PlayerInfo>({
+    name: 'Away Player',
+    skill_level: 3,
+    race_to: EIGHT_BALL_RACE[3] ?? 2,
+    target_points: NINE_BALL_TARGETS[3] ?? 25,
   });
+
+  useEffect(() => {
+    const fetchMatchData = async () => {
+      if (!matchId) return;
+
+      // Get game format from team match -> division -> league
+      const { data: teamMatch } = await supabase
+        .from('team_matches')
+        .select('division:divisions!division_id(league:leagues!league_id(game_format))')
+        .eq('id', matchId)
+        .single();
+
+      const division = teamMatch?.division as any;
+      const format: GameFormat = division?.league?.game_format === 'nine_ball' ? '9-ball' : '8-ball';
+      setGameFormat(format);
+
+      // Get individual match at this order position
+      const { data: individualMatches } = await supabase
+        .from('individual_matches')
+        .select('*, home_player:players!home_player_id(first_name, last_name, skill_level), away_player:players!away_player_id(first_name, last_name, skill_level)')
+        .eq('team_match_id', matchId)
+        .eq('match_order', matchIndex + 1)
+        .limit(1);
+
+      if (individualMatches && individualMatches.length > 0) {
+        const im = individualMatches[0] as any;
+        setIndividualMatchId(im.id);
+        const homeSL = im.home_player?.skill_level ?? im.home_skill_level ?? 3;
+        const awaySL = im.away_player?.skill_level ?? im.away_skill_level ?? 3;
+        setHomePlayer({
+          name: `${im.home_player?.first_name ?? ''} ${im.home_player?.last_name ?? ''}`.trim() || 'Home Player',
+          skill_level: homeSL,
+          race_to: EIGHT_BALL_RACE[homeSL] ?? 2,
+          target_points: NINE_BALL_TARGETS[homeSL] ?? 25,
+        });
+        setAwayPlayer({
+          name: `${im.away_player?.first_name ?? ''} ${im.away_player?.last_name ?? ''}`.trim() || 'Away Player',
+          skill_level: awaySL,
+          race_to: EIGHT_BALL_RACE[awaySL] ?? 2,
+          target_points: NINE_BALL_TARGETS[awaySL] ?? 25,
+        });
+      }
+    };
+
+    fetchMatchData();
+  }, [matchId, matchIndex]);
 
   // 8-ball state
   const [eightBall, setEightBall] = useState<EightBallState>({
@@ -178,15 +225,39 @@ export default function IndividualMatchScoringScreen() {
     navigateNext();
   };
 
-  const navigateNext = () => {
-    // TODO: Save individual match result to store/API
+  const navigateNext = async () => {
+    // Save individual match result
+    if (individualMatchId) {
+      try {
+        const homeScore = gameFormat === '8-ball' ? homeGamesWon : nineBall.home_points;
+        const awayScore = gameFormat === '8-ball' ? awayGamesWon : nineBall.away_points;
+        const winnerId = homeScore > awayScore ? 'home' : awayScore > homeScore ? 'away' : null;
+
+        await supabase
+          .from('individual_matches')
+          .update({
+            home_points_earned: homeScore,
+            away_points_earned: awayScore,
+            // winner_player_id is set server-side or could be set here if we had the IDs
+          })
+          .eq('id', individualMatchId);
+
+        // Update team match status to in_progress if not already
+        await supabase
+          .from('team_matches')
+          .update({ status: 'in_progress' })
+          .eq('id', matchId!)
+          .in('status', ['lineup_set', 'scheduled']);
+      } catch (error) {
+        console.error('Failed to save match result:', error);
+      }
+    }
+
     if (matchIndex < 4) {
-      // Navigate to next individual match
       router.push(
         `/(team)/(tabs)/scoring/${matchId}/${matchIndex + 1}`
       );
     } else {
-      // All 5 individual matches done, go to finalize
       router.push(`/(team)/(tabs)/scoring/${matchId}/finalize`);
     }
   };

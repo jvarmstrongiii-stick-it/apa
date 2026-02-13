@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -12,6 +12,8 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { router, useLocalSearchParams } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { theme } from '../../../../../src/constants/theme';
+import { supabase } from '../../../../../src/lib/supabase';
+import { useAuthContext } from '../../../../../src/providers/AuthProvider';
 
 interface IndividualMatchResult {
   match_number: number;
@@ -25,19 +27,48 @@ interface IndividualMatchResult {
   is_complete: boolean;
 }
 
-// TODO: Replace with actual match results from store/API
-const PLACEHOLDER_RESULTS: IndividualMatchResult[] = [
-  { match_number: 1, home_player: 'John D.', away_player: 'Mike S.', home_skill: 5, away_skill: 4, home_score: 3, away_score: 2, winner: 'home', is_complete: true },
-  { match_number: 2, home_player: 'Sarah L.', away_player: 'Chris P.', home_skill: 3, away_skill: 6, home_score: 2, away_score: 3, winner: 'away', is_complete: true },
-  { match_number: 3, home_player: 'Tom R.', away_player: 'Amy K.', home_skill: 4, away_skill: 3, home_score: 3, away_score: 1, winner: 'home', is_complete: true },
-  { match_number: 4, home_player: 'Lisa M.', away_player: 'Dave W.', home_skill: 6, away_skill: 5, home_score: 2, away_score: 3, winner: 'away', is_complete: true },
-  { match_number: 5, home_player: 'Bob N.', away_player: 'Jane F.', home_skill: 5, away_skill: 4, home_score: 3, away_score: 0, winner: 'home', is_complete: true },
-];
-
 export default function FinalizeScreen() {
   const { matchId } = useLocalSearchParams<{ matchId: string }>();
-  const [results] = useState<IndividualMatchResult[]>(PLACEHOLDER_RESULTS);
+  const { user } = useAuthContext();
+  const [results, setResults] = useState<IndividualMatchResult[]>([]);
   const [isFinalizing, setIsFinalizing] = useState(false);
+  const [isLoading, setIsLoading] = useState(true);
+
+  useEffect(() => {
+    const fetchResults = async () => {
+      if (!matchId) return;
+
+      const { data, error } = await supabase
+        .from('individual_matches')
+        .select('*, home_player:players!home_player_id(first_name, last_name), away_player:players!away_player_id(first_name, last_name)')
+        .eq('team_match_id', matchId)
+        .order('match_order');
+
+      if (error) {
+        console.error('Failed to fetch individual matches:', error.message);
+        setIsLoading(false);
+        return;
+      }
+
+      const mapped: IndividualMatchResult[] = (data ?? []).map((im: any) => ({
+        match_number: im.match_order,
+        home_player: `${im.home_player?.first_name ?? ''} ${(im.home_player?.last_name ?? '').charAt(0)}.`.trim(),
+        away_player: `${im.away_player?.first_name ?? ''} ${(im.away_player?.last_name ?? '').charAt(0)}.`.trim(),
+        home_skill: im.home_skill_level,
+        away_skill: im.away_skill_level,
+        home_score: im.home_points_earned ?? 0,
+        away_score: im.away_points_earned ?? 0,
+        winner: im.winner_player_id === im.home_player_id ? 'home' as const
+          : im.winner_player_id === im.away_player_id ? 'away' as const
+          : null,
+        is_complete: im.winner_player_id !== null,
+      }));
+      setResults(mapped);
+      setIsLoading(false);
+    };
+
+    fetchResults();
+  }, [matchId]);
 
   const homeTotalPoints = results.reduce(
     (sum, r) => sum + (r.winner === 'home' ? r.home_score : 0) + (r.winner === 'away' ? r.home_score : 0),
@@ -75,8 +106,18 @@ export default function FinalizeScreen() {
           onPress: async () => {
             setIsFinalizing(true);
             try {
-              // TODO: Submit finalized match to API
-              await new Promise((resolve) => setTimeout(resolve, 500));
+              const { error } = await supabase
+                .from('team_matches')
+                .update({
+                  status: 'completed',
+                  home_score: homeTotalPoints,
+                  away_score: awayTotalPoints,
+                  finalized_by: user?.id ?? null,
+                  finalized_at: new Date().toISOString(),
+                })
+                .eq('id', matchId!);
+
+              if (error) throw error;
 
               Alert.alert('Match Finalized', 'The match has been submitted successfully.', [
                 {
@@ -84,8 +125,8 @@ export default function FinalizeScreen() {
                   onPress: () => router.replace('/(team)/(tabs)'),
                 },
               ]);
-            } catch (error) {
-              Alert.alert('Error', 'Failed to finalize match. Please try again.');
+            } catch (error: any) {
+              Alert.alert('Error', error?.message ?? 'Failed to finalize match. Please try again.');
             } finally {
               setIsFinalizing(false);
             }

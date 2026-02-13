@@ -10,6 +10,8 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { router, useFocusEffect } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { theme } from '../../../../src/constants/theme';
+import { supabase } from '../../../../src/lib/supabase';
+import { useAuthContext } from '../../../../src/providers/AuthProvider';
 
 type ScorableStatus = 'scheduled' | 'lineup_set' | 'in_progress';
 
@@ -41,30 +43,6 @@ const ACTION_LABELS: Record<ScorableStatus, string> = {
   lineup_set: 'Start Scoring',
   in_progress: 'Continue Scoring',
 };
-
-// TODO: Replace with actual API data
-const PLACEHOLDER_SCORABLE: ScorableMatch[] = [
-  {
-    id: 'match-1',
-    opponent_name: 'Cue Ballers',
-    scheduled_date: '2026-02-03T19:00:00Z',
-    status: 'scheduled',
-    is_home: true,
-    location: "Sharkey's Billiards",
-    game_format: '8-ball',
-    current_individual_match: null,
-  },
-  {
-    id: 'match-2',
-    opponent_name: 'Break Masters',
-    scheduled_date: '2026-02-03T19:30:00Z',
-    status: 'in_progress',
-    is_home: false,
-    location: "Fast Eddie's",
-    game_format: '9-ball',
-    current_individual_match: 3,
-  },
-];
 
 function ScorableMatchItem({ match }: { match: ScorableMatch }) {
   const matchDate = new Date(match.scheduled_date);
@@ -171,20 +149,58 @@ function ScorableMatchItem({ match }: { match: ScorableMatch }) {
 }
 
 export default function TeamScoringIndex() {
-  const [matches, setMatches] = useState<ScorableMatch[]>(PLACEHOLDER_SCORABLE);
+  const { profile } = useAuthContext();
+  const teamId = profile?.team_id;
+  const [matches, setMatches] = useState<ScorableMatch[]>([]);
   const [refreshing, setRefreshing] = useState(false);
+
+  const fetchScorableMatches = useCallback(async () => {
+    if (!teamId) return;
+
+    const { data, error } = await supabase
+      .from('team_matches')
+      .select('id, match_date, status, home_team_id, away_team_id, home_team:teams!home_team_id(name), away_team:teams!away_team_id(name), division:divisions!division_id(location, league:leagues!league_id(game_format)), individual_matches(id, match_order)')
+      .or(`home_team_id.eq.${teamId},away_team_id.eq.${teamId}`)
+      .in('status', ['scheduled', 'lineup_set', 'in_progress'])
+      .order('match_date', { ascending: true });
+
+    if (error) {
+      console.error('Failed to fetch scorable matches:', error.message);
+      return;
+    }
+
+    const mapped: ScorableMatch[] = (data ?? []).map((m: any) => {
+      const isHome = m.home_team_id === teamId;
+      const gameFormat = m.division?.league?.game_format === 'nine_ball' ? '9-ball' : '8-ball';
+      const individualMatches = m.individual_matches ?? [];
+      const currentMatch = individualMatches.length > 0
+        ? Math.max(...individualMatches.map((im: any) => im.match_order))
+        : null;
+
+      return {
+        id: m.id,
+        opponent_name: isHome ? (m.away_team?.name ?? 'Unknown') : (m.home_team?.name ?? 'Unknown'),
+        scheduled_date: m.match_date,
+        status: m.status as ScorableStatus,
+        is_home: isHome,
+        location: m.division?.location ?? '',
+        game_format: gameFormat as '8-ball' | '9-ball',
+        current_individual_match: currentMatch,
+      };
+    });
+    setMatches(mapped);
+  }, [teamId]);
 
   useFocusEffect(
     useCallback(() => {
-      // TODO: Fetch scorable matches from API
-    }, [])
+      fetchScorableMatches();
+    }, [fetchScorableMatches])
   );
 
   const handleRefresh = async () => {
     setRefreshing(true);
     try {
-      // TODO: Fetch scorable matches from API
-      await new Promise((resolve) => setTimeout(resolve, 500));
+      await fetchScorableMatches();
     } finally {
       setRefreshing(false);
     }

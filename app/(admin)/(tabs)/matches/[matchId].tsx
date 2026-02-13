@@ -14,6 +14,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { router, useLocalSearchParams } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { theme } from '../../../../src/constants/theme';
+import { supabase } from '../../../../src/lib/supabase';
 
 type MatchStatus = 'scheduled' | 'lineup_set' | 'in_progress' | 'completed' | 'disputed' | 'finalized';
 
@@ -84,36 +85,63 @@ export default function AdminMatchDetail() {
   const fetchMatchDetail = async () => {
     setIsLoading(true);
     try {
-      // TODO: Fetch match detail from API using matchId
-      await new Promise((resolve) => setTimeout(resolve, 300));
+      const { data, error } = await supabase
+        .from('team_matches')
+        .select(`
+          *,
+          home_team:teams!home_team_id(name),
+          away_team:teams!away_team_id(name),
+          division:divisions!division_id(name, league:leagues!league_id(name)),
+          individual_matches(*, home_player:players!home_player_id(first_name, last_name, skill_level), away_player:players!away_player_id(first_name, last_name, skill_level)),
+          audit_log(*, profile:profiles!user_id(display_name)),
+          disputes(reason, status)
+        `)
+        .eq('id', matchId!)
+        .single();
 
-      const mockMatch: MatchDetail = {
-        id: matchId ?? '1',
-        home_team_name: 'Rack Attack',
-        away_team_name: 'Cue Ballers',
-        scheduled_date: '2026-02-03T19:00:00Z',
-        status: 'finalized',
-        home_total_points: 12,
-        away_total_points: 8,
-        league_name: 'Monday 8-Ball',
-        division_name: 'Division A',
-        individual_matches: [
-          { match_number: 1, home_player: 'John D.', away_player: 'Mike S.', home_skill: 5, away_skill: 4, home_score: 3, away_score: 2, winner: 'home' },
-          { match_number: 2, home_player: 'Sarah L.', away_player: 'Chris P.', home_skill: 3, away_skill: 6, home_score: 2, away_score: 3, winner: 'away' },
-          { match_number: 3, home_player: 'Tom R.', away_player: 'Amy K.', home_skill: 4, away_skill: 3, home_score: 3, away_score: 1, winner: 'home' },
-          { match_number: 4, home_player: 'Lisa M.', away_player: 'Dave W.', home_skill: 6, away_skill: 5, home_score: 2, away_score: 3, winner: 'away' },
-          { match_number: 5, home_player: 'Bob N.', away_player: 'Jane F.', home_skill: 5, away_skill: 4, home_score: 3, away_score: 0, winner: 'home' },
-        ],
-        audit_log: [
-          { id: 'a1', action: 'Match Created', user_name: 'System', timestamp: '2026-01-20T10:00:00Z', details: 'Match scheduled' },
-          { id: 'a2', action: 'Lineup Submitted', user_name: 'John D.', timestamp: '2026-02-03T18:30:00Z', details: 'Home team lineup set' },
-          { id: 'a3', action: 'Scoring Started', user_name: 'John D.', timestamp: '2026-02-03T19:05:00Z', details: 'Match scoring began' },
-          { id: 'a4', action: 'Match Finalized', user_name: 'John D.', timestamp: '2026-02-03T22:15:00Z', details: 'Final score: 12-8' },
-        ],
-        dispute_reason: null,
+      if (error) throw error;
+
+      const individualMatches: IndividualMatch[] = (data.individual_matches ?? [])
+        .sort((a: any, b: any) => a.match_order - b.match_order)
+        .map((im: any) => ({
+          match_number: im.match_order,
+          home_player: `${im.home_player?.first_name ?? ''} ${(im.home_player?.last_name ?? '').charAt(0)}.`.trim(),
+          away_player: `${im.away_player?.first_name ?? ''} ${(im.away_player?.last_name ?? '').charAt(0)}.`.trim(),
+          home_skill: im.home_skill_level,
+          away_skill: im.away_skill_level,
+          home_score: im.home_points_earned ?? 0,
+          away_score: im.away_points_earned ?? 0,
+          winner: im.winner_player_id === im.home_player_id ? 'home' as const : im.winner_player_id === im.away_player_id ? 'away' as const : null,
+        }));
+
+      const auditLog: AuditEntry[] = (data.audit_log ?? [])
+        .sort((a: any, b: any) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime())
+        .map((entry: any) => ({
+          id: entry.id,
+          action: entry.action,
+          user_name: entry.profile?.display_name ?? 'System',
+          timestamp: entry.created_at,
+          details: entry.new_data ? JSON.stringify(entry.new_data) : entry.action,
+        }));
+
+      const openDispute = (data.disputes ?? []).find((d: any) => d.status !== 'resolved' && d.status !== 'dismissed');
+
+      const matchDetail: MatchDetail = {
+        id: data.id,
+        home_team_name: data.home_team?.name ?? 'Unknown',
+        away_team_name: data.away_team?.name ?? 'Unknown',
+        scheduled_date: data.match_date,
+        status: data.status as MatchStatus,
+        home_total_points: data.home_score ?? 0,
+        away_total_points: data.away_score ?? 0,
+        league_name: data.division?.league?.name ?? '',
+        division_name: data.division?.name ?? '',
+        individual_matches: individualMatches,
+        audit_log: auditLog,
+        dispute_reason: openDispute?.reason ?? null,
       };
 
-      setMatch(mockMatch);
+      setMatch(matchDetail);
     } catch (error) {
       console.error('Failed to fetch match:', error);
     } finally {
@@ -129,15 +157,19 @@ export default function AdminMatchDetail() {
 
     setIsReopening(true);
     try {
-      // TODO: Reopen match via API
-      await new Promise((resolve) => setTimeout(resolve, 500));
+      const { error } = await supabase
+        .from('team_matches')
+        .update({ status: 'in_progress', finalized_by: null, finalized_at: null })
+        .eq('id', match!.id);
+
+      if (error) throw error;
 
       setMatch((prev) => (prev ? { ...prev, status: 'in_progress' } : prev));
       setShowReopenModal(false);
       setReopenReason('');
       Alert.alert('Success', 'Match has been reopened.');
-    } catch (error) {
-      Alert.alert('Error', 'Failed to reopen match.');
+    } catch (error: any) {
+      Alert.alert('Error', error?.message ?? 'Failed to reopen match.');
     } finally {
       setIsReopening(false);
     }

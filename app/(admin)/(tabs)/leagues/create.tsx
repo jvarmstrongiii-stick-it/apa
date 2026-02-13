@@ -15,6 +15,8 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { theme } from '../../../../src/constants/theme';
+import { supabase } from '../../../../src/lib/supabase';
+import { useAuthContext } from '../../../../src/providers/AuthProvider';
 
 type GameFormat = '8-ball' | '9-ball';
 
@@ -26,6 +28,7 @@ const GAME_FORMATS: { label: string; value: GameFormat }[] = [
 const SEASONS = ['Spring', 'Summer', 'Fall', 'Winter'];
 
 export default function CreateLeagueScreen() {
+  const { user } = useAuthContext();
   const [name, setName] = useState('');
   const [gameFormat, setGameFormat] = useState<GameFormat>('8-ball');
   const [season, setSeason] = useState('Spring');
@@ -45,14 +48,22 @@ export default function CreateLeagueScreen() {
 
     setIsSaving(true);
     try {
-      // TODO: Create league via API
-      await new Promise((resolve) => setTimeout(resolve, 500));
+      const dbFormat = gameFormat === '8-ball' ? 'eight_ball' : 'nine_ball';
+      const { error } = await supabase.from('leagues').insert({
+        name: name.trim(),
+        game_format: dbFormat,
+        season: season,
+        year: parseInt(year),
+        created_by: user?.id ?? '',
+      });
+
+      if (error) throw error;
 
       Alert.alert('Success', 'League created successfully.', [
         { text: 'OK', onPress: () => router.back() },
       ]);
-    } catch (error) {
-      Alert.alert('Error', 'Failed to create league. Please try again.');
+    } catch (error: any) {
+      Alert.alert('Error', error?.message ?? 'Failed to create league. Please try again.');
     } finally {
       setIsSaving(false);
     }

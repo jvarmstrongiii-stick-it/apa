@@ -11,6 +11,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { router, useLocalSearchParams } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { theme } from '../../../../src/constants/theme';
+import { supabase } from '../../../../src/lib/supabase';
 
 type RowStatus = 'success' | 'error' | 'skipped';
 
@@ -57,38 +58,39 @@ export default function ImportResultsScreen() {
   const fetchImportDetail = async () => {
     setIsLoading(true);
     try {
-      // TODO: Fetch import detail from API using importId
-      await new Promise((resolve) => setTimeout(resolve, 300));
+      const { data, error } = await supabase
+        .from('imports')
+        .select('*, import_rows(*)')
+        .eq('id', importId!)
+        .single();
 
-      const mockData: ImportDetail = {
-        id: importId ?? '1',
-        filename: 'spring_2026_rosters.pdf',
-        uploaded_at: '2026-01-28T14:30:00Z',
-        total_rows: 24,
-        success_count: 20,
-        error_count: 3,
-        skipped_count: 1,
-        rows: Array.from({ length: 24 }, (_, i) => {
-          const status: RowStatus =
-            i < 20 ? 'success' : i < 23 ? 'error' : 'skipped';
-          return {
-            row_number: i + 1,
-            status,
-            data_summary:
-              status === 'success'
-                ? `Player ${i + 1}: John Doe (SL ${Math.floor(Math.random() * 5) + 2})`
-                : `Row ${i + 1} data`,
-            error_message:
-              status === 'error'
-                ? 'Duplicate player ID detected. Player already exists in roster.'
-                : status === 'skipped'
-                  ? 'Row contained no valid data fields.'
-                  : null,
-          };
-        }),
+      if (error) throw error;
+
+      const rows: ImportRow[] = (data.import_rows ?? [])
+        .sort((a: any, b: any) => a.row_number - b.row_number)
+        .map((r: any) => ({
+          row_number: r.row_number,
+          status: r.status === 'pending' ? 'skipped' : r.status,
+          data_summary: r.raw_data
+            ? Object.values(r.raw_data).join(', ').slice(0, 80)
+            : `Row ${r.row_number}`,
+          error_message: r.error_message,
+        }));
+
+      const skippedCount = rows.filter((r) => r.status === 'skipped').length;
+
+      const importDetail: ImportDetail = {
+        id: data.id,
+        filename: data.file_name,
+        uploaded_at: data.created_at,
+        total_rows: data.total_rows ?? 0,
+        success_count: data.processed_rows ?? 0,
+        error_count: data.error_rows ?? 0,
+        skipped_count: skippedCount,
+        rows,
       };
 
-      setImportData(mockData);
+      setImportData(importDetail);
     } catch (error) {
       console.error('Failed to fetch import detail:', error);
     } finally {

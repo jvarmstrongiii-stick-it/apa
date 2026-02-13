@@ -11,6 +11,8 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { router, useLocalSearchParams } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { theme } from '../../../../../src/constants/theme';
+import { supabase } from '../../../../../src/lib/supabase';
+import { useAuthContext } from '../../../../../src/providers/AuthProvider';
 
 interface Player {
   id: string;
@@ -22,27 +24,40 @@ interface Player {
 const MAX_SKILL_TOTAL = 23; // APA 23-rule for 8-ball
 const LINEUP_SIZE = 5;
 
-// TODO: Replace with actual API data
-const PLACEHOLDER_ROSTER: Player[] = [
-  { id: 'p1', name: 'John Doe', skill_level: 5, is_available: true },
-  { id: 'p2', name: 'Sarah Lee', skill_level: 3, is_available: true },
-  { id: 'p3', name: 'Tom Rogers', skill_level: 4, is_available: true },
-  { id: 'p4', name: 'Lisa Martin', skill_level: 6, is_available: true },
-  { id: 'p5', name: 'Bob Nelson', skill_level: 5, is_available: true },
-  { id: 'p6', name: 'Amy Kim', skill_level: 3, is_available: true },
-  { id: 'p7', name: 'Dave Wilson', skill_level: 4, is_available: false },
-  { id: 'p8', name: 'Jane Foster', skill_level: 2, is_available: true },
-];
-
 export default function LineupScreen() {
   const { matchId } = useLocalSearchParams<{ matchId: string }>();
-  const [roster, setRoster] = useState<Player[]>(PLACEHOLDER_ROSTER);
+  const { profile } = useAuthContext();
+  const teamId = profile?.team_id;
+  const [roster, setRoster] = useState<Player[]>([]);
   const [selectedPlayers, setSelectedPlayers] = useState<string[]>([]);
   const [putUpOrder, setPutUpOrder] = useState<string[]>([]);
 
   useEffect(() => {
-    // TODO: Fetch roster from API
-  }, [matchId]);
+    const fetchRoster = async () => {
+      if (!teamId) return;
+
+      const { data, error } = await supabase
+        .from('team_players')
+        .select('is_captain, player:players!player_id(id, first_name, last_name, skill_level, is_active)')
+        .eq('team_id', teamId)
+        .is('left_at', null);
+
+      if (error) {
+        console.error('Failed to fetch roster:', error.message);
+        return;
+      }
+
+      const mapped: Player[] = (data ?? []).map((tp: any) => ({
+        id: tp.player?.id ?? '',
+        name: `${tp.player?.first_name ?? ''} ${tp.player?.last_name ?? ''}`.trim(),
+        skill_level: tp.player?.skill_level ?? 0,
+        is_available: tp.player?.is_active ?? true,
+      }));
+      setRoster(mapped);
+    };
+
+    fetchRoster();
+  }, [matchId, teamId]);
 
   const selectedSkillTotal = selectedPlayers.reduce((total, playerId) => {
     const player = roster.find((p) => p.id === playerId);
@@ -109,11 +124,40 @@ export default function LineupScreen() {
 
   const submitLineup = async () => {
     try {
-      // TODO: Submit lineup to API
-      await new Promise((resolve) => setTimeout(resolve, 300));
+      if (!teamId || !matchId) throw new Error('Missing team or match ID');
+
+      // Build lineup insert rows
+      const lineupRows = putUpOrder.map((playerId, index) => {
+        const player = roster.find((p) => p.id === playerId);
+        return {
+          team_match_id: matchId,
+          team_id: teamId,
+          player_id: playerId,
+          position: index + 1,
+          skill_level_at_time: player?.skill_level ?? 0,
+        };
+      });
+
+      // Delete any existing lineup for this team+match, then insert new
+      await supabase
+        .from('lineups')
+        .delete()
+        .eq('team_match_id', matchId)
+        .eq('team_id', teamId);
+
+      const { error } = await supabase.from('lineups').insert(lineupRows);
+      if (error) throw error;
+
+      // Update match status to lineup_set if it was scheduled
+      await supabase
+        .from('team_matches')
+        .update({ status: 'lineup_set' })
+        .eq('id', matchId)
+        .eq('status', 'scheduled');
+
       router.push(`/(team)/(tabs)/scoring/${matchId}/0`);
-    } catch (error) {
-      Alert.alert('Error', 'Failed to submit lineup. Please try again.');
+    } catch (error: any) {
+      Alert.alert('Error', error?.message ?? 'Failed to submit lineup. Please try again.');
     }
   };
 

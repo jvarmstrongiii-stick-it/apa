@@ -1,36 +1,132 @@
-import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { useState, useCallback } from 'react';
+import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { router } from 'expo-router';
+import { router, useFocusEffect } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { theme } from '../../../src/constants/theme';
 import { useAuthContext } from '../../../src/providers/AuthProvider';
+import { supabase } from '../../../src/lib/supabase';
+
+interface TeamData {
+  teamName: string;
+  wins: number;
+  losses: number;
+  nextMatch: {
+    id: string;
+    opponent: string;
+    date: string;
+    location: string;
+    isHome: boolean;
+  } | null;
+  seasonRecord: {
+    totalPoints: number;
+    pointsAgainst: number;
+    matchesPlayed: number;
+    matchesRemaining: number;
+  };
+}
 
 export default function TeamDashboard() {
-  const { user } = useAuthContext();
+  const { profile } = useAuthContext();
+  const teamId = profile?.team_id;
 
-  // TODO: Fetch real team data from API
-  const teamData = {
-    teamName: 'Rack Attack',
-    wins: 8,
-    losses: 4,
-    nextMatch: {
-      id: 'match-1',
-      opponent: 'Cue Ballers',
-      date: '2026-02-03T19:00:00Z',
-      location: "Sharkey's Billiards",
-      isHome: true,
-    },
-    seasonRecord: {
-      totalPoints: 142,
-      pointsAgainst: 98,
-      matchesPlayed: 12,
-      matchesRemaining: 6,
-    },
-  };
+  const [teamData, setTeamData] = useState<TeamData>({
+    teamName: '',
+    wins: 0,
+    losses: 0,
+    nextMatch: null,
+    seasonRecord: { totalPoints: 0, pointsAgainst: 0, matchesPlayed: 0, matchesRemaining: 0 },
+  });
+  const [isLoading, setIsLoading] = useState(true);
+
+  const fetchDashboard = useCallback(async () => {
+    if (!teamId) { setIsLoading(false); return; }
+
+    try {
+      // Fetch team name
+      const { data: team } = await supabase
+        .from('teams')
+        .select('name')
+        .eq('id', teamId)
+        .single();
+
+      // Fetch all matches for this team
+      const { data: matches } = await supabase
+        .from('team_matches')
+        .select('id, match_date, status, home_score, away_score, home_team_id, away_team_id, home_team:teams!home_team_id(name), away_team:teams!away_team_id(name), division:divisions!division_id(location)')
+        .or(`home_team_id.eq.${teamId},away_team_id.eq.${teamId}`)
+        .order('match_date', { ascending: true });
+
+      const allMatches = matches ?? [];
+      const completedMatches = allMatches.filter((m: any) =>
+        m.status === 'completed' || m.status === 'finalized'
+      );
+      const upcomingMatches = allMatches.filter((m: any) =>
+        m.status === 'scheduled' || m.status === 'lineup_set' || m.status === 'in_progress'
+      );
+
+      let wins = 0, losses = 0, totalPoints = 0, pointsAgainst = 0;
+      for (const m of completedMatches) {
+        const isHome = m.home_team_id === teamId;
+        const ourScore = isHome ? (m.home_score ?? 0) : (m.away_score ?? 0);
+        const theirScore = isHome ? (m.away_score ?? 0) : (m.home_score ?? 0);
+        totalPoints += ourScore;
+        pointsAgainst += theirScore;
+        if (ourScore > theirScore) wins++;
+        else if (ourScore < theirScore) losses++;
+      }
+
+      let nextMatch: TeamData['nextMatch'] = null;
+      if (upcomingMatches.length > 0) {
+        const nm: any = upcomingMatches[0];
+        const isHome = nm.home_team_id === teamId;
+        nextMatch = {
+          id: nm.id,
+          opponent: isHome ? (nm.away_team?.name ?? 'Unknown') : (nm.home_team?.name ?? 'Unknown'),
+          date: nm.match_date,
+          location: nm.division?.location ?? '',
+          isHome,
+        };
+      }
+
+      setTeamData({
+        teamName: team?.name ?? 'My Team',
+        wins,
+        losses,
+        nextMatch,
+        seasonRecord: {
+          totalPoints,
+          pointsAgainst,
+          matchesPlayed: completedMatches.length,
+          matchesRemaining: upcomingMatches.length,
+        },
+      });
+    } catch (error) {
+      console.error('Failed to fetch dashboard:', error);
+    } finally {
+      setIsLoading(false);
+    }
+  }, [teamId]);
+
+  useFocusEffect(
+    useCallback(() => {
+      fetchDashboard();
+    }, [fetchDashboard])
+  );
 
   const nextMatchDate = teamData.nextMatch
     ? new Date(teamData.nextMatch.date)
     : null;
+
+  if (isLoading) {
+    return (
+      <SafeAreaView style={styles.safeArea} edges={['top']}>
+        <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
+          <ActivityIndicator size="large" color={theme.colors.primary} />
+        </View>
+      </SafeAreaView>
+    );
+  }
 
   return (
     <SafeAreaView style={styles.safeArea} edges={['top']}>
@@ -116,7 +212,7 @@ export default function TeamDashboard() {
               ]}
               onPress={() =>
                 router.push(
-                  `/(team)/(tabs)/scoring/${teamData.nextMatch.id}/lineup`
+                  `/(team)/(tabs)/scoring/${teamData.nextMatch!.id}/lineup`
                 )
               }
             >

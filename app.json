@@ -26,7 +26,11 @@
         "backgroundColor": "#0A0A0A"
       },
       "edgeToEdgeEnabled": true,
-      "package": "com.apaleague.app"
+      "package": "com.apaleague.app",
+      "permissions": [
+        "android.permission.USE_BIOMETRIC",
+        "android.permission.USE_FINGERPRINT"
+      ]
     },
     "web": {
       "bundler": "metro",
@@ -36,10 +40,23 @@
     "plugins": [
       "expo-router",
       "expo-secure-store",
-      "expo-local-authentication"
+      "expo-local-authentication",
+      "expo-updates"
     ],
+    "updates": {
+      "url": "https://u.expo.dev/a44f5cb7-0c98-41dc-b922-676e661b09e0"
+    },
+    "runtimeVersion": {
+      "policy": "appVersion"
+    },
     "experiments": {
       "typedRoutes": true
+    },
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "a44f5cb7-0c98-41dc-b922-676e661b09e0"
+      }
     }
   }
 }

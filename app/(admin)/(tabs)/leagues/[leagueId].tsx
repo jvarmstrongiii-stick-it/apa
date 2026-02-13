@@ -13,6 +13,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { router, useLocalSearchParams } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { theme } from '../../../../src/constants/theme';
+import { supabase } from '../../../../src/lib/supabase';
 
 interface Division {
   id: string;
@@ -49,26 +50,32 @@ export default function AdminLeagueDetail() {
   const fetchLeague = async () => {
     setIsLoading(true);
     try {
-      // TODO: Fetch league detail from API using leagueId
-      await new Promise((resolve) => setTimeout(resolve, 300));
+      const { data, error } = await supabase
+        .from('leagues')
+        .select('*, divisions(*, teams(id))')
+        .eq('id', leagueId!)
+        .single();
 
-      const mockLeague: LeagueDetail = {
-        id: leagueId ?? '1',
-        name: 'Monday 8-Ball',
-        game_format: '8-ball',
-        season: 'Spring',
-        year: 2026,
-        is_active: true,
-        divisions: [
-          { id: 'd1', name: 'Division A', team_count: 6 },
-          { id: 'd2', name: 'Division B', team_count: 6 },
-        ],
+      if (error) throw error;
+
+      const league: LeagueDetail = {
+        id: data.id,
+        name: data.name,
+        game_format: data.game_format === 'eight_ball' ? '8-ball' : '9-ball',
+        season: data.season,
+        year: data.year,
+        is_active: data.is_active,
+        divisions: (data.divisions ?? []).map((d: any) => ({
+          id: d.id,
+          name: d.name,
+          team_count: Array.isArray(d.teams) ? d.teams.length : 0,
+        })),
       };
 
-      setLeague(mockLeague);
-      setName(mockLeague.name);
-      setSeason(mockLeague.season);
-      setYear(String(mockLeague.year));
+      setLeague(league);
+      setName(league.name);
+      setSeason(league.season);
+      setYear(String(league.year));
     } catch (error) {
       console.error('Failed to fetch league:', error);
     } finally {
@@ -84,16 +91,24 @@ export default function AdminLeagueDetail() {
 
     setIsSaving(true);
     try {
-      // TODO: Save league changes via API
-      await new Promise((resolve) => setTimeout(resolve, 500));
+      const { error } = await supabase
+        .from('leagues')
+        .update({
+          name: name.trim(),
+          season: season.trim(),
+          year: parseInt(year),
+        })
+        .eq('id', league!.id);
+
+      if (error) throw error;
 
       setLeague((prev) =>
         prev ? { ...prev, name: name.trim(), season: season.trim(), year: parseInt(year) } : prev
       );
       setIsEditing(false);
       Alert.alert('Success', 'League updated successfully.');
-    } catch (error) {
-      Alert.alert('Error', 'Failed to save changes. Please try again.');
+    } catch (error: any) {
+      Alert.alert('Error', error?.message ?? 'Failed to save changes. Please try again.');
     } finally {
       setIsSaving(false);
     }
@@ -107,12 +122,26 @@ export default function AdminLeagueDetail() {
         { text: 'Cancel', style: 'cancel' },
         {
           text: 'Add',
-          onPress: (divisionName) => {
+          onPress: async (divisionName?: string) => {
             if (divisionName?.trim()) {
-              // TODO: Add division via API
+              const { data, error } = await supabase
+                .from('divisions')
+                .insert({
+                  league_id: league!.id,
+                  name: divisionName.trim(),
+                  day_of_week: 0,
+                })
+                .select()
+                .single();
+
+              if (error) {
+                Alert.alert('Error', error.message);
+                return;
+              }
+
               const newDivision: Division = {
-                id: `d${Date.now()}`,
-                name: divisionName.trim(),
+                id: data.id,
+                name: data.name,
                 team_count: 0,
               };
               setLeague((prev) =>
@@ -132,8 +161,17 @@ export default function AdminLeagueDetail() {
       {
         text: 'Remove',
         style: 'destructive',
-        onPress: () => {
-          // TODO: Remove division via API
+        onPress: async () => {
+          const { error } = await supabase
+            .from('divisions')
+            .delete()
+            .eq('id', divisionId);
+
+          if (error) {
+            Alert.alert('Error', error.message);
+            return;
+          }
+
           setLeague((prev) =>
             prev
               ? {
