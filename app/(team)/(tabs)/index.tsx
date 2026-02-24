@@ -138,11 +138,13 @@ export default function TeamDashboard() {
         {/* Header */}
         <View style={styles.header}>
           <Text style={styles.teamName}>{teamData.teamName}</Text>
+          {/* W/L hidden until scoresheets include match results — uncomment to restore:
           <View style={styles.recordBadge}>
             <Text style={styles.recordText}>
               {teamData.wins}W - {teamData.losses}L
             </Text>
           </View>
+          */}
         </View>
 
         {/* Next Match Card */}
@@ -219,6 +221,20 @@ export default function TeamDashboard() {
               <Ionicons name="create" size={22} color="#FFFFFF" />
               <Text style={styles.scoreMatchButtonText}>Score Match</Text>
             </Pressable>
+
+            {/* Show when multiple upcoming matches exist */}
+            {teamData.seasonRecord.matchesRemaining > 1 && (
+              <Pressable
+                style={({ pressed }) => [
+                  styles.pickAnotherButton,
+                  pressed && styles.buttonPressed,
+                ]}
+                onPress={() => router.push('/(team)/(tabs)/scoring')}
+              >
+                <Ionicons name="swap-horizontal-outline" size={18} color={theme.colors.primary} />
+                <Text style={styles.pickAnotherText}>Pick Another Match</Text>
+              </Pressable>
+            )}
           </View>
         )}
 
@@ -395,6 +411,23 @@ const styles = StyleSheet.create({
     fontSize: 18,
     fontWeight: '700',
     color: '#FFFFFF',
+  },
+  pickAnotherButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    marginTop: 10,
+    paddingVertical: 12,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: theme.colors.primary,
+    backgroundColor: theme.colors.primary + '10',
+  },
+  pickAnotherText: {
+    fontSize: 15,
+    fontWeight: '600',
+    color: theme.colors.primary,
   },
   sectionTitle: {
     fontSize: 20,

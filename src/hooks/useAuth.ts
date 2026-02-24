@@ -41,14 +41,14 @@ export function useAuth() {
       .from('profiles')
       .select('*')
       .eq('id', userId)
-      .single();
+      .maybeSingle();
 
     if (error) {
       console.error('[useAuth] Failed to fetch profile:', error.message);
       return null;
     }
 
-    return data as Profile;
+    return data as Profile | null;
   }, []);
 
   // ------------------------------------------------------------------
@@ -58,7 +58,9 @@ export function useAuth() {
   useEffect(() => {
     let isMounted = true;
 
-    // 1. Restore existing session (if any)
+    // 1. Always clear any persisted session on cold launch.
+    //    Players and admins must select their team / role every time they open the app.
+    //    "My Teams" memory in SecureStore still pre-populates the picker for quick re-selection.
     const bootstrap = async () => {
       try {
         const { data: { session } } = await supabase.auth.getSession();
@@ -66,26 +68,13 @@ export function useAuth() {
         if (!isMounted) return;
 
         if (session?.user) {
-          const profile = await fetchProfile(session.user.id);
-
-          if (!isMounted) return;
-
-          setState({
-            session,
-            user: session.user,
-            profile,
-            role: profile?.role ?? null,
-            isLoading: false,
-            isAuthenticated: true,
-          });
-        } else {
-          setState({ ...initialState, isLoading: false });
+          await supabase.auth.signOut();
         }
+
+        if (isMounted) setState({ ...initialState, isLoading: false });
       } catch (err) {
         console.error('[useAuth] Bootstrap error:', err);
-        if (isMounted) {
-          setState({ ...initialState, isLoading: false });
-        }
+        if (isMounted) setState({ ...initialState, isLoading: false });
       }
     };
 
@@ -173,22 +162,15 @@ export function useAuth() {
   );
 
   // ------------------------------------------------------------------
-  // Sign-in: Team
+  // Sign-in: Team (anonymous auth — no email or password required)
   // ------------------------------------------------------------------
 
   const signInTeam = useCallback(
-    async (username: string, password: string) => {
+    async (teamId: string) => {
       setState((prev) => ({ ...prev, isLoading: true }));
 
-      // Team accounts sign in with their username used as an email-style
-      // identifier.  The Supabase auth table stores the email; the caller
-      // may pass either a bare username or a full email.
-      const email = username.includes('@') ? username : username;
-
-      const { data, error } = await supabase.auth.signInWithPassword({
-        email,
-        password,
-      });
+      // Create an anonymous Supabase session — players never type credentials.
+      const { data, error } = await supabase.auth.signInAnonymously();
 
       if (error) {
         setState((prev) => ({ ...prev, isLoading: false }));
@@ -201,19 +183,25 @@ export function useAuth() {
         throw new Error('Sign-in succeeded but no user was returned.');
       }
 
-      const profile = await fetchProfile(user.id);
+      // Link this anonymous session to the chosen team via a SECURITY DEFINER
+      // RPC that upserts the profile row (bypasses RLS for the insert).
+      const { error: rpcError } = await supabase.rpc('set_player_team', {
+        p_team_id: teamId,
+      });
 
-      if (!profile || profile.role !== 'team') {
+      if (rpcError) {
         await supabase.auth.signOut();
         setState({ ...initialState, isLoading: false });
-        throw new Error('Access denied. This account does not have team privileges.');
+        throw new Error('Could not save team selection. Please try again.');
       }
+
+      const profile = await fetchProfile(user.id);
 
       setState({
         session: data.session,
         user,
         profile,
-        role: profile.role,
+        role: profile?.role ?? null,
         isLoading: false,
         isAuthenticated: true,
       });
@@ -222,6 +210,17 @@ export function useAuth() {
     },
     [fetchProfile],
   );
+
+  // ------------------------------------------------------------------
+  // Refresh profile (call after mutating the profile row, e.g. team selection)
+  // ------------------------------------------------------------------
+
+  const refreshProfile = useCallback(async () => {
+    const userId = state.user?.id;
+    if (!userId) return;
+    const profile = await fetchProfile(userId);
+    setState((prev) => ({ ...prev, profile, role: profile?.role ?? null }));
+  }, [state.user?.id, fetchProfile]);
 
   // ------------------------------------------------------------------
   // Sign-out
@@ -253,5 +252,6 @@ export function useAuth() {
     signInAdmin,
     signInTeam,
     signOut,
+    refreshProfile,
   };
 }
