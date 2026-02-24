@@ -6,10 +6,10 @@
  */
 
 /** Supabase project URL - replace with your actual project URL */
-export const SUPABASE_URL = 'https://wpsxvcjgzibjkttdrgtf.supabase.co';
+export const SUPABASE_URL = 'https://lyhlnaibdqznipllfmuu.supabase.co';
 
 /** Supabase anonymous/public key - replace with your actual anon key */
-export const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Indwc3h2Y2pnemliamt0dGRyZ3RmIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Njk3MjM2NDQsImV4cCI6MjA4NTI5OTY0NH0.OI38xpet-OuhsceTd-89BuvAW_4Y0kMaj8OInCsUIrY';
+export const SUPABASE_ANON_KEY = 'sb_publishable_IBpl_871JxTdEwY2I4mcRA_Pim3T8gD';
 
 /** How often to sync local changes with the server (ms) */
 export const SYNC_INTERVAL_MS = 30000;

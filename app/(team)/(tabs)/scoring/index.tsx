@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useRef } from 'react';
 import {
   FlatList,
   Pressable,
@@ -12,6 +12,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { theme } from '../../../../src/constants/theme';
 import { supabase } from '../../../../src/lib/supabase';
 import { useAuthContext } from '../../../../src/providers/AuthProvider';
+import { CoinFlipModal } from '../../../../src/components/CoinFlipModal';
 
 type ScorableStatus = 'scheduled' | 'lineup_set' | 'in_progress';
 
@@ -44,13 +45,19 @@ const ACTION_LABELS: Record<ScorableStatus, string> = {
   in_progress: 'Continue Scoring',
 };
 
-function ScorableMatchItem({ match }: { match: ScorableMatch }) {
+function ScorableMatchItem({
+  match,
+  onScheduledPress,
+}: {
+  match: ScorableMatch;
+  onScheduledPress: (matchId: string, isHome: boolean) => void;
+}) {
   const matchDate = new Date(match.scheduled_date);
 
   const handlePress = () => {
     switch (match.status) {
       case 'scheduled':
-        router.push(`/(team)/(tabs)/scoring/${match.id}/lineup`);
+        onScheduledPress(match.id, match.is_home);
         break;
       case 'lineup_set':
         router.push(`/(team)/(tabs)/scoring/${match.id}/0`);
@@ -153,6 +160,33 @@ export default function TeamScoringIndex() {
   const teamId = profile?.team_id;
   const [matches, setMatches] = useState<ScorableMatch[]>([]);
   const [refreshing, setRefreshing] = useState(false);
+  const [coinFlipVisible, setCoinFlipVisible] = useState(false);
+  const pendingMatchId = useRef<string | null>(null);
+  const pendingIsHome = useRef<boolean>(true);
+
+  const handleScheduledPress = (matchId: string, isHome: boolean) => {
+    pendingMatchId.current = matchId;
+    pendingIsHome.current = isHome;
+    setCoinFlipVisible(true);
+  };
+
+  const handleCoinFlipReady = (result: { firstMatch: boolean; ourTeamPutsUpFirst: boolean | null }) => {
+    setCoinFlipVisible(false);
+    const matchId = pendingMatchId.current;
+    const isHome = pendingIsHome.current;
+    pendingMatchId.current = null;
+    if (!matchId) return;
+
+    if (result.firstMatch) {
+      const putUpTeam =
+        result.ourTeamPutsUpFirst === isHome ? 'home' : 'away';
+      router.push(
+        `/(team)/(tabs)/scoring/${matchId}/putup?matchOrder=1&putUpTeam=${putUpTeam}`
+      );
+    } else {
+      router.push(`/(team)/(tabs)/scoring/${matchId}/resume`);
+    }
+  };
 
   const fetchScorableMatches = useCallback(async () => {
     if (!teamId) return;
@@ -208,6 +242,7 @@ export default function TeamScoringIndex() {
 
   return (
     <SafeAreaView style={styles.safeArea} edges={['top']}>
+      <CoinFlipModal visible={coinFlipVisible} onReady={handleCoinFlipReady} />
       <View style={styles.headerBar}>
         <Text style={styles.headerTitle}>Scoring</Text>
       </View>
@@ -215,7 +250,9 @@ export default function TeamScoringIndex() {
       <FlatList
         data={matches}
         keyExtractor={(item) => item.id}
-        renderItem={({ item }) => <ScorableMatchItem match={item} />}
+        renderItem={({ item }) => (
+          <ScorableMatchItem match={item} onScheduledPress={handleScheduledPress} />
+        )}
         contentContainerStyle={styles.listContent}
         showsVerticalScrollIndicator={false}
         refreshing={refreshing}

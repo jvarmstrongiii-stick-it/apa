@@ -6,6 +6,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { theme } from '../../../src/constants/theme';
 import { useAuthContext } from '../../../src/providers/AuthProvider';
 import { supabase } from '../../../src/lib/supabase';
+import { CoinFlipModal, CoinFlipResult } from '../../../src/components/CoinFlipModal';
 
 interface TeamData {
   teamName: string;
@@ -13,6 +14,7 @@ interface TeamData {
   losses: number;
   nextMatch: {
     id: string;
+    status: string;
     opponent: string;
     date: string;
     location: string;
@@ -38,6 +40,7 @@ export default function TeamDashboard() {
     seasonRecord: { totalPoints: 0, pointsAgainst: 0, matchesPlayed: 0, matchesRemaining: 0 },
   });
   const [isLoading, setIsLoading] = useState(true);
+  const [coinFlipVisible, setCoinFlipVisible] = useState(false);
 
   const fetchDashboard = useCallback(async () => {
     if (!teamId) { setIsLoading(false); return; }
@@ -82,6 +85,7 @@ export default function TeamDashboard() {
         const isHome = nm.home_team_id === teamId;
         nextMatch = {
           id: nm.id,
+          status: nm.status,
           opponent: isHome ? (nm.away_team?.name ?? 'Unknown') : (nm.home_team?.name ?? 'Unknown'),
           date: nm.match_date,
           location: nm.division?.location ?? '',
@@ -128,8 +132,25 @@ export default function TeamDashboard() {
     );
   }
 
+  const handleCoinFlipReady = (result: CoinFlipResult) => {
+    setCoinFlipVisible(false);
+    const match = teamData.nextMatch;
+    if (!match) return;
+
+    if (result.firstMatch) {
+      const putUpTeam =
+        result.ourTeamPutsUpFirst === match.isHome ? 'home' : 'away';
+      router.push(
+        `/(team)/(tabs)/scoring/${match.id}/putup?matchOrder=1&putUpTeam=${putUpTeam}`
+      );
+    } else {
+      router.push(`/(team)/(tabs)/scoring/${match.id}/resume`);
+    }
+  };
+
   return (
     <SafeAreaView style={styles.safeArea} edges={['top']}>
+      <CoinFlipModal visible={coinFlipVisible} onReady={handleCoinFlipReady} />
       <ScrollView
         style={styles.scrollView}
         contentContainerStyle={styles.scrollContent}
@@ -212,11 +233,7 @@ export default function TeamDashboard() {
                 styles.scoreMatchButton,
                 pressed && styles.buttonPressed,
               ]}
-              onPress={() =>
-                router.push(
-                  `/(team)/(tabs)/scoring/${teamData.nextMatch!.id}/lineup`
-                )
-              }
+              onPress={() => setCoinFlipVisible(true)}
             >
               <Ionicons name="create" size={22} color="#FFFFFF" />
               <Text style={styles.scoreMatchButtonText}>Score Match</Text>
