@@ -1,5 +1,5 @@
 # Pool League Scoring App — Working Specification
-**Living Document | Updated 2026-02-28**
+**Living Document | Updated 2026-03-04**
 
 ---
 
@@ -22,7 +22,7 @@ A multi-league pool scoring app. APA is the primary initial use case. All rule s
 
 The app is a **contingency scorekeeper**: it supplements official paper scoresheets and provides real-time digital tracking during matches. Final authority remains with the paper scoresheet; the app is the digital assistant.
 
-Two user roles: **Team** (scorekeepers, anonymous auth) and **Admin** (league operators, email/password).
+Three user roles: **Team** (scorekeepers, anonymous auth), **LO** (League Operator, email/password), and **Superuser/Admin** (platform admin, email/password).
 
 ---
 
@@ -54,11 +54,22 @@ Two user roles: **Team** (scorekeepers, anonymous auth) and **Admin** (league op
 - "My Teams" preference stored in `expo-secure-store` key `team-prefs`
 - Season fingerprint: active league IDs — change clears stored teams
 
-### Admin Auth
-- Standard email/password via `supabase.auth.signInWithPassword()`
-- Profile `role = 'admin'`
+### LO (League Operator) Auth
+- Email/password via `supabase.auth.signInWithPassword()`
+- Profile `role = 'lo'`
+- Created by superuser via `create-lo-account` edge function
+- Assigned to one league (`league_id` on profile); area name shown as league's `name`
+- Access: PDF import, match management, league data — same as admin but scoped
+- Login via "League Operator Login" link on the player login screen
 
-### Login Flow (3 steps)
+### Superuser (Admin) Auth
+- Email/password via `supabase.auth.signInWithPassword()`
+- Profile `role = 'admin'`
+- Access: full platform — creates leagues, manages LO accounts
+- Login via `/(auth)/admin-login`
+- Dashboard: Switch User (→ player login) | Log Out (→ admin login)
+
+### Login Flow (3 steps) — Team side
 1. **Pick**: "Continue as Player" (team picker, plain list from scheduled matches only) | "League Operator Login"
 2. **Confirm**: "You selected [team]?" → Yes / Change Team
 3. **Match**: sign in → fetch active matches → 0 matches → dashboard | 1 match → auto-navigate | 2+ matches → list
@@ -80,7 +91,7 @@ Two user roles: **Team** (scorekeepers, anonymous auth) and **Admin** (league op
 | `game_format` | `eight_ball`, `nine_ball` |
 | `match_status` | `imported`, `scheduled`, `lineup_set`, `in_progress`, `completed`, `finalized`, `disputed` |
 | `audit_action` | `create`, `update`, `delete`, `finalize`, `reopen`, `lock`, `unlock`, `import`, `dispute_create`, `dispute_resolve` |
-| `user_role` | `admin`, `team` |
+| `user_role` | `admin`, `lo`, `team` |
 | `import_status` | `pending`, `processing`, `completed`, `failed` |
 | `import_row_status` | `success`, `error`, `skipped` |
 | `dispute_status` | `open`, `under_review`, `resolved`, `dismissed` |
@@ -90,14 +101,18 @@ Two user roles: **Team** (scorekeepers, anonymous auth) and **Admin** (league op
 |---|---|---|
 | id | uuid PK | FK → auth.users |
 | role | user_role | DEFAULT 'team' |
-| team_id | uuid | FK → teams |
+| team_id | uuid | FK → teams (team role only) |
+| first_name | text | |
+| last_name | text | |
 | display_name | text | |
+| email | text | LO login email (for password reset flows) |
+| league_id | uuid | FK → leagues ON DELETE SET NULL (LO role: links to managed league) |
 
 ### leagues
 | Column | Type | Notes |
 |---|---|---|
 | id | uuid PK | |
-| name | text | |
+| name | text | Also used as LO's "area" display name |
 | game_format | game_format | |
 | season | text | e.g. 'Spring' |
 | year | integer | |
@@ -110,6 +125,7 @@ Two user roles: **Team** (scorekeepers, anonymous auth) and **Admin** (league op
 | id | uuid PK | |
 | league_id | uuid | FK → leagues |
 | name | text | |
+| number | integer | Division number |
 | day_of_week | integer | 0–6 |
 | location | text | |
 
@@ -120,6 +136,7 @@ Two user roles: **Team** (scorekeepers, anonymous auth) and **Admin** (league op
 | division_id | uuid | FK → divisions |
 | name | text | |
 | team_number | text | APA team number |
+| is_active | boolean | DEFAULT true |
 
 ### players
 | Column | Type | Notes |
@@ -163,7 +180,7 @@ Two user roles: **Team** (scorekeepers, anonymous auth) and **Admin** (league op
 | match_date | date | |
 | week_number | integer | |
 | status | match_status | DEFAULT 'scheduled'; `imported` = parsed but not yet promoted by admin |
-| import_id | uuid | FK → imports ON DELETE SET NULL; set by edge function; used to cascade-delete unscheduled matches when import is deleted |
+| import_id | uuid | FK → imports ON DELETE SET NULL; cascades to delete unscheduled matches when import is deleted |
 | home_score / away_score | integer | Team-level APA points |
 | locked_by / locked_at | uuid / timestamptz | |
 | finalized_by / finalized_at | uuid / timestamptz | |
@@ -256,14 +273,28 @@ Legend: **✅ BUILT** | **🔶 PARTIAL** | **❌ NOT STARTED**
 | Feature | Status | Notes |
 |---|---|---|
 | Anonymous team login | ✅ BUILT | `signInAnonymously()` + RPC |
-| Admin email/password login | ✅ BUILT | |
+| LO email/password login | ✅ BUILT | Via "League Operator Login" on player login screen |
+| Admin (superuser) email/password login | ✅ BUILT | Separate `/(auth)/admin-login` route |
 | Cold-launch always show login | ✅ BUILT | Bootstrap signs out session |
 | Remembered team preferences | ✅ BUILT | `expo-secure-store` |
 | Season fingerprint (clear stale teams) | ✅ BUILT | |
 | Logout (team side) | ✅ BUILT | Icon in dashboard header + Quick Actions |
-| Forgot Password / reset | ❌ NOT STARTED | |
+| Switch User / Log Out (superuser side) | ✅ BUILT | Header buttons on superuser dashboard |
+| Forgot Password / reset | ❌ NOT STARTED | `supabase.auth.resetPasswordForEmail()` ready to wire up; Password Reset button in LO edit modal sends reset email |
 
-### Admin — League Management
+### Superuser — Platform Management
+| Feature | Status | Notes |
+|---|---|---|
+| Superuser dashboard | ✅ BUILT | `(superuser)` route group; tabs: Dashboard, Leagues, LO Accounts |
+| League list (superuser view) | ✅ BUILT | |
+| LO account list | ✅ BUILT | Cards show name + assigned league |
+| Create LO account | ✅ BUILT | `create-lo-account` edge function; mandatory league assignment |
+| Edit LO account (name + league) | ✅ BUILT | Slide-up modal; league picker pre-selected |
+| Send LO password reset email | ✅ BUILT | Button in edit modal; `resetPasswordForEmail()` |
+| Delete LO account | ✅ BUILT | `delete-lo-account` edge function; cascades auth user → profile |
+| LO area = league name | ✅ BUILT | `profiles.league_id` FK; area shown from `leagues.name` |
+
+### Admin/LO — League Management
 | Feature | Status | Notes |
 |---|---|---|
 | League list | ✅ BUILT | |
@@ -275,7 +306,7 @@ Legend: **✅ BUILT** | **🔶 PARTIAL** | **❌ NOT STARTED**
 | Division management (add/remove) | ✅ BUILT | Within league detail screen |
 | League Settings page (configurable rules) | ❌ NOT STARTED | See §8 Gaps |
 
-### Admin — Match Management
+### Admin/LO — Match Management
 | Feature | Status | Notes |
 |---|---|---|
 | Match list with filter chips | ✅ BUILT | Scheduled / In Progress / Completed / Disputed / Finalized |
@@ -285,7 +316,7 @@ Legend: **✅ BUILT** | **🔶 PARTIAL** | **❌ NOT STARTED**
 | Force takeover (admin takes scoring control) | ❌ NOT STARTED | |
 | Schedule generation | ❌ NOT STARTED | Matches currently imported via PDF |
 
-### Admin — PDF Import
+### Admin/LO — PDF Import
 | Feature | Status | Notes |
 |---|---|---|
 | File picker + upload to Storage | ✅ BUILT | Native FormData + REST API |
@@ -296,7 +327,7 @@ Legend: **✅ BUILT** | **🔶 PARTIAL** | **❌ NOT STARTED**
 | Select All / uncheck to exclude pairs | ✅ BUILT | Division filter (8-ball / 9-ball / by division); Leave or Remove unscheduled |
 | Re-import updates existing records | ✅ BUILT | Player names + SL updated; MP updated on team_players |
 
-### Admin — Player & Team Management
+### Admin/LO — Player & Team Management
 | Feature | Status | Notes |
 |---|---|---|
 | Player management via import | ✅ BUILT | |
@@ -359,7 +390,7 @@ Legend: **✅ BUILT** | **🔶 PARTIAL** | **❌ NOT STARTED**
 | UNLOCK (type "UNLOCK") | ✅ BUILT | Sets status back to 'in_progress' |
 | Incomplete match warning | ✅ BUILT | |
 
-### Admin — Disputes
+### Admin/LO — Disputes
 | Feature | Status | Notes |
 |---|---|---|
 | Disputes table (DB) | ✅ BUILT | |
@@ -374,13 +405,13 @@ Legend: **✅ BUILT** | **🔶 PARTIAL** | **❌ NOT STARTED**
 |---|---|---|---|
 | **AUTH** | | | |
 | Login | `/(auth)/login` | ✅ BUILT | 3-step: pick → confirm → match |
-| Admin Login | `/(auth)/admin-login` | ✅ BUILT | Email/password |
+| Admin Login | `/(auth)/admin-login` | ✅ BUILT | Email/password (LO + superuser) |
 | Forgot Password | — | ❌ NOT STARTED | |
 | **TEAM** | | | |
 | Team Dashboard | `/(team)/(tabs)/` | ✅ BUILT | Next match, season summary, quick actions, logout |
 | Scoring Index | `/(team)/(tabs)/scoring` | ✅ BUILT | Scorable match list |
 | Coin Flip Modal | component | ✅ BUILT | Used by dashboard + scoring index |
-| Catchup Wizard | `/(team)/(tabs)/scoring/[matchId]/catchup` | ✅ BUILT | |
+| Catchup Wizard | `/(team)/(tabs)/scoring/[matchId]/catchup` | ✅ BUILT | Retroactive data entry |
 | Put Up | `/(team)/(tabs)/scoring/[matchId]/putup` | ✅ BUILT | Realtime two-device |
 | Resume | `/(team)/(tabs)/scoring/[matchId]/resume` | ✅ BUILT | |
 | Individual Match Scoring | `/(team)/(tabs)/scoring/[matchId]/[individualMatchIndex]` | ✅ BUILT | Full scoring screen |
@@ -391,7 +422,7 @@ Legend: **✅ BUILT** | **🔶 PARTIAL** | **❌ NOT STARTED**
 | Live Viewer (read-only) | — | ❌ NOT STARTED | |
 | Handoff Request (Initiator) | — | ❌ NOT STARTED | Full flow per spec §4.2 |
 | Handoff Request (Receiver) | — | ❌ NOT STARTED | |
-| **ADMIN** | | | |
+| **ADMIN / LO** | | | |
 | Admin Dashboard | `/(admin)/(tabs)/` | ✅ BUILT | Stats cards + quick actions |
 | League List | `/(admin)/(tabs)/leagues` | ✅ BUILT | |
 | League Detail | `/(admin)/(tabs)/leagues/[leagueId]` | ✅ BUILT | Edit + division management |
@@ -402,11 +433,18 @@ Legend: **✅ BUILT** | **🔶 PARTIAL** | **❌ NOT STARTED**
 | Match Flag / Notes | — | ❌ NOT STARTED | |
 | Force Takeover Confirm | — | ❌ NOT STARTED | |
 | Import Rosters | `/(admin)/(tabs)/import` | ✅ BUILT | Swipe-to-delete; cancel during upload; staged-count banner |
-| Import Results | `/(admin)/(tabs)/import/[importId]` | ✅ BUILT | Filename formatted; conditional filter chips (Errors/Skipped hidden if clean) |
+| Import Results | `/(admin)/(tabs)/import/[importId]` | ✅ BUILT | Filename formatted; conditional filter chips |
 | Import Staging | `/(admin)/(tabs)/import/staging` | ✅ BUILT | Division filter, checkboxes, Move to Scheduled, Leave/Remove unscheduled |
+| Divisions | `/(admin)/(tabs)/divisions` | ✅ BUILT | Navigated from dashboard; Stack sub-navigation |
+| Division Detail | `/(admin)/(tabs)/divisions/[divisionId]` | ✅ BUILT | |
+| Team Detail | `/(admin)/(tabs)/divisions/[divisionId]/team/[teamId]` | ✅ BUILT | |
 | Player Management | — | ❌ NOT STARTED | Direct CRUD |
 | Team Management | — | ❌ NOT STARTED | Direct CRUD |
 | Admin Settings | `/(admin)/(tabs)/settings` | ✅ BUILT | Account, biometrics (TODO), sign out |
+| **SUPERUSER** | | | |
+| Superuser Dashboard | `/(superuser)/(tabs)/` | ✅ BUILT | Switch User + Log Out buttons |
+| Superuser Leagues | `/(superuser)/(tabs)/leagues` | ✅ BUILT | League list/management |
+| LO Accounts | `/(superuser)/(tabs)/accounts` | ✅ BUILT | Create/edit/delete LO accounts; league picker |
 
 ---
 
@@ -521,11 +559,11 @@ The pessimistic locking system (`scorecard_sessions`) is in the DB schema but th
 ### Handoff Flow Simplified
 Spec §4.2 describes a request/confirm/read-only handoff. Current implementation: tapping the handoff icon shows an alert and navigates to the resume screen. No request flow, no read-only mode.
 
-### PDF Import Staging — Implemented
-Parsed matches land in `status = 'imported'` (invisible to teams). Admin reviews in staging screen, promotes selected matches to `scheduled`, and can leave or remove unchosen matches. Division filter supports 8-ball / 9-ball separation since the league has both formats.
-
 ### Disputes UI Missing
 The `disputes` table is in the DB and the admin dashboard shows an Open Disputes count, but there is no screen to view, create, or resolve disputes.
+
+### Switch User vs. Log Out (Superuser)
+Both buttons on the superuser dashboard sign out and navigate away (Switch User → player login, Log Out → admin login). The distinction is the destination only; there is no separate "switch user" session mechanism.
 
 ---
 
@@ -561,7 +599,7 @@ The `disputes` table is in the DB and the admin dashboard shows an Open Disputes
 - [ ] 9-ball active scoring (ball-by-ball rack tracking)
 - [ ] Multi-admin notifications on flagging
 - [ ] Protest/dispute workflow
-- [ ] Forgot Password flow
+- [ ] Forgot Password flow (UI; `resetPasswordForEmail()` already wired for LO accounts)
 
 ### Performance (deferred — app must be stable first)
 - [ ] Parallelize DB writes in `saveAndNavigate` and finalize
@@ -569,32 +607,45 @@ The `disputes` table is in the DB and the admin dashboard shows an Open Disputes
 
 ---
 
-## Edge Function
+## Edge Functions
 
-**Deploy command:**
-```bash
-npx supabase functions deploy parse-pdf --project-ref lyhlnaibdqznipllfmuu --no-verify-jwt
-```
-`--no-verify-jwt` required — function handles auth internally (admin role check).
+| Function | Purpose | Deploy Command |
+|---|---|---|
+| `parse-pdf` | Parse APA scoresheet PDF, write to DB | `npx supabase functions deploy parse-pdf --project-ref lyhlnaibdqznipllfmuu --no-verify-jwt` |
+| `create-lo-account` | Create LO auth user + profile (admin only) | `npx supabase functions deploy create-lo-account --project-ref lyhlnaibdqznipllfmuu --no-verify-jwt` |
+| `delete-lo-account` | Delete LO auth user + profile (admin only) | `npx supabase functions deploy delete-lo-account --project-ref lyhlnaibdqznipllfmuu --no-verify-jwt` |
+
+`--no-verify-jwt` required — functions handle auth internally (role check via service role key).
 Docker not required for remote deploys (warning appears but works).
 
 ---
 
 ## DB Reset (dev only)
+
+Use `supabase/truncate_data.sql` for one-click data erasure. Preserves leagues and admin/lo profiles.
+Truncates in strict reverse FK order (no CASCADE — CASCADE would wipe profiles via `profiles.team_id → teams`).
+
 ```sql
--- Clear match data, keep league + admin
-TRUNCATE TABLE team_matches, team_players, players, skill_level_history CASCADE;
-DELETE FROM teams;
-DELETE FROM auth.users WHERE is_anonymous = true;
+-- After running truncate_data.sql:
+-- 1. No need to redeploy edge functions — RLS policies and schema unaffected
+-- 2. Re-import scoresheets to repopulate divisions, teams, players, and match data
+-- NOTE: If LO login stops working after a fresh schema change,
+--       re-run supabase/migrations/00021_lo_rls_policies.sql in the SQL editor
 ```
 
-## Restore Admin Profile
+## Restore Admin/LO Profile (if accidentally deleted)
 ```sql
+-- Admin profile
 INSERT INTO profiles (id, role)
-SELECT id, 'admin' FROM auth.users WHERE is_anonymous = false
+SELECT id, 'admin' FROM auth.users WHERE email = 'your-admin@email.com'
 ON CONFLICT (id) DO UPDATE SET role = 'admin';
+
+-- LO profile
+INSERT INTO profiles (id, role)
+SELECT id, 'lo' FROM auth.users WHERE email = 'your-lo@email.com'
+ON CONFLICT (id) DO NOTHING;
 ```
 
 ---
 
-*Last updated: 2026-02-28 | Maintained alongside codebase in `/apa/SPEC.md`*
+*Last updated: 2026-03-04 | Maintained alongside codebase in `/apa/SPEC.md`*
