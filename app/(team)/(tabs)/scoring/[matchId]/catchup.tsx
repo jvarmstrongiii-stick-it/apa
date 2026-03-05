@@ -149,7 +149,11 @@ export default function CatchupScreen() {
 
     setHomePlayers(mapPlayers(homeResult.data ?? []));
     setAwayPlayers(mapPlayers(awayResult.data ?? []));
-    setPhase('select_start');
+    // Default to match 1 — skip the select_start screen for a fresh match.
+    // The select_start screen remains for future mid-session start support.
+    router.replace(
+      `/(team)/(tabs)/scoring/${matchId}/putup?matchOrder=1&putUpTeam=${coinFlipPutUpTeam}`
+    );
   }, [matchId]);
 
   useEffect(() => {

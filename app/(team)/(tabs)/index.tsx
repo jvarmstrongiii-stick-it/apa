@@ -164,7 +164,7 @@ export default function TeamDashboard() {
 
   return (
     <SafeAreaView style={styles.safeArea} edges={['top']}>
-      <CoinFlipModal visible={coinFlipVisible} onReady={handleCoinFlipReady} />
+      <CoinFlipModal visible={coinFlipVisible} onReady={handleCoinFlipReady} onCancel={() => setCoinFlipVisible(false)} />
       <ScrollView
         style={styles.scrollView}
         contentContainerStyle={styles.scrollContent}

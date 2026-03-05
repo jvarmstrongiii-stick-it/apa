@@ -107,26 +107,24 @@ export default function PutUpScreen() {
   const handleDevBypass = async () => {
     if (!indMatch || !roster.length || !ourSide) return;
     const ourPlayer = roster[0];
-
-    // Fetch one player from the opponent team for the other slot
-    let opponentPlayerId = ourPlayer.id; // fallback (avoids nullable column issues)
-    if (opponentTeamId) {
-      const { data: oppRoster } = await supabase
-        .from('team_players')
-        .select('player_id')
-        .eq('team_id', opponentTeamId)
-        .limit(1);
-      if (oppRoster && oppRoster.length > 0) {
-        opponentPlayerId = oppRoster[0].player_id;
-      }
-    }
+    // Use a roster player with a different SL for the opponent slot — cross-team query is RLS-blocked
+    const opponentPlayer =
+      roster.find(p => p.skill_level !== ourPlayer.skill_level) ??
+      roster[1] ??
+      roster[0];
+    const opponentPlayerId = opponentPlayer.id;
 
     const homeId = ourSide === 'home' ? ourPlayer.id : opponentPlayerId;
     const awayId = ourSide === 'away' ? ourPlayer.id : opponentPlayerId;
 
     const { data: updated } = await supabase
       .from('individual_matches')
-      .update({ home_player_id: homeId, away_player_id: awayId })
+      .update({
+        home_player_id: homeId,
+        away_player_id: awayId,
+        home_skill_level: ourSide === 'home' ? ourPlayer.skill_level : opponentPlayer.skill_level,
+        away_skill_level: ourSide === 'away' ? ourPlayer.skill_level : opponentPlayer.skill_level,
+      })
       .eq('id', indMatch.id)
       .select('id, home_player_id, away_player_id, put_up_team')
       .single();
@@ -174,11 +172,11 @@ export default function PutUpScreen() {
     const init = async () => {
       if (!matchId || !teamId) return;
 
-      // Fetch team match to determine our side and game format
+      // Fetch team match to determine our side, game format, and status
       const { data: tm } = await supabase
         .from('team_matches')
         .select(
-          'home_team_id, away_team_id, division:divisions!division_id(league:leagues!league_id(game_format))'
+          'home_team_id, away_team_id, status, division:divisions!division_id(league:leagues!league_id(game_format))'
         )
         .eq('id', matchId)
         .single();
@@ -189,6 +187,7 @@ export default function PutUpScreen() {
       const oppTeamId: string =
         side === 'home' ? (tm as any).away_team_id : (tm as any).home_team_id;
       const gameFormat = (tm as any).division?.league?.game_format ?? 'eight_ball';
+      const tmStatus: string = (tm as any).status ?? 'scheduled';
 
       setOurSide(side);
       setOpponentTeamId(oppTeamId);
@@ -233,6 +232,18 @@ export default function PutUpScreen() {
           .select('id, home_player_id, away_player_id, put_up_team')
           .maybeSingle();
         im = created;
+      } else if (
+        tmStatus === 'scheduled' &&
+        im.home_player_id &&
+        im.away_player_id
+      ) {
+        // Stale player IDs from a previous aborted session — clear them so the
+        // put-up flow runs fresh. Only safe when the match hasn't started yet.
+        await supabase
+          .from('individual_matches')
+          .update({ home_player_id: null, away_player_id: null, home_skill_level: null, away_skill_level: null })
+          .eq('id', im.id);
+        im = { ...im, home_player_id: null, away_player_id: null };
       }
 
       if (!im) { setLoading(false); return; }
@@ -280,7 +291,12 @@ export default function PutUpScreen() {
   // ─── Auto-navigate when both players are set ──────────────────────────────
   useEffect(() => {
     if (!indMatch?.home_player_id || !indMatch?.away_player_id) return;
-    const timer = setTimeout(() => {
+    const timer = setTimeout(async () => {
+      // Mark the team match as in_progress now that scoring has begun
+      await supabase
+        .from('team_matches')
+        .update({ status: 'in_progress' })
+        .eq('id', matchId);
       router.replace(
         `/(team)/(tabs)/scoring/${matchId}/${matchOrder - 1}`
       );
@@ -295,9 +311,11 @@ export default function PutUpScreen() {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
 
     const field = ourSide === 'home' ? 'home_player_id' : 'away_player_id';
+    const skillField = ourSide === 'home' ? 'home_skill_level' : 'away_skill_level';
+    const skillLevel = roster.find(p => p.id === playerId)?.skill_level ?? null;
     const { data: updated } = await supabase
       .from('individual_matches')
-      .update({ [field]: playerId })
+      .update({ [field]: playerId, [skillField]: skillLevel })
       .eq('id', indMatch.id)
       .select('id, home_player_id, away_player_id, put_up_team')
       .single();

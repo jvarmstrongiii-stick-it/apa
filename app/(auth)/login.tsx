@@ -221,7 +221,7 @@ export default function LoginScreen() {
   const navigateToMatch = useCallback((match: MatchOption) => {
     switch (match.status) {
       case 'scheduled':
-        router.replace(`/(team)/(tabs)/scoring/${match.id}/lineup`);
+        router.replace(`/(team)/(tabs)/scoring`);
         break;
       case 'lineup_set':
         router.replace(`/(team)/(tabs)/scoring/${match.id}/0`);

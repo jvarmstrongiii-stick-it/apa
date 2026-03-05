@@ -45,8 +45,7 @@ export default function TeamRoster() {
             supabase
               .from('team_players')
               .select('is_active, player:players(id, member_number, first_name, last_name, skill_level, is_active)')
-              .eq('team_id', teamId!)
-              .order('players(last_name)'),
+              .eq('team_id', teamId!),
           ]);
 
           if (teamResult.error) throw teamResult.error;
@@ -343,6 +342,14 @@ const styles = StyleSheet.create({
   },
   memberNumber: {
     fontSize: 12,
+    color: theme.colors.textSecondary,
+  },
+  emptyContainer: {
+    alignItems: 'center',
+    paddingVertical: 40,
+  },
+  emptyText: {
+    fontSize: 15,
     color: theme.colors.textSecondary,
   },
   inactiveBadge: {

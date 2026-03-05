@@ -28,11 +28,12 @@ export interface CoinFlipResult {
 interface Props {
   visible: boolean;
   onReady: (result: CoinFlipResult) => void;
+  onCancel?: () => void;
 }
 
 const COIN_SIZE = 120;
 
-export function CoinFlipModal({ visible, onReady }: Props) {
+export function CoinFlipModal({ visible, onReady, onCancel }: Props) {
   const [step, setStep] = useState<Step>('first_match');
   const [coinFace, setCoinFace] = useState<'HEADS' | 'TAILS' | null>(null);
   const [isFlipping, setIsFlipping] = useState(false);
@@ -68,7 +69,7 @@ export function CoinFlipModal({ visible, onReady }: Props) {
   };
 
   return (
-    <Modal visible={visible} transparent animationType="fade" statusBarTranslucent onRequestClose={() => {}}>
+    <Modal visible={visible} transparent animationType="fade" statusBarTranslucent onRequestClose={onCancel}>
       <View style={styles.overlay}>
         <View style={styles.card}>
 
@@ -203,6 +204,15 @@ export function CoinFlipModal({ visible, onReady }: Props) {
             </>
           )}
 
+          {onCancel && (
+            <Pressable
+              style={({ pressed }) => [styles.cancelBtn, pressed && styles.pressed]}
+              onPress={onCancel}
+            >
+              <Text style={styles.cancelBtnText}>Cancel</Text>
+            </Pressable>
+          )}
+
         </View>
       </View>
     </Modal>
@@ -307,5 +317,13 @@ const styles = StyleSheet.create({
   },
   btnDisabled: {
     opacity: 0.5,
+  },
+  cancelBtn: {
+    paddingVertical: 10,
+    alignItems: 'center',
+  },
+  cancelBtnText: {
+    fontSize: 15,
+    color: theme.colors.textSecondary,
   },
 });

@@ -1,5 +1,5 @@
 # Pool League Scoring App — Working Specification
-**Living Document | Updated 2026-03-04**
+**Living Document | Updated 2026-03-05**
 
 ---
 
@@ -77,7 +77,7 @@ Three user roles: **Team** (scorekeepers, anonymous auth), **LO** (League Operat
 ### Match Navigation by Status (from login)
 | Status | Route |
 |---|---|
-| `scheduled` | `/(team)/(tabs)/scoring/${id}/lineup` |
+| `scheduled` | `/(team)/(tabs)/scoring` (scoring tab — coin flip opens from match card) |
 | `lineup_set` | `/(team)/(tabs)/scoring/${id}/0` |
 | `in_progress` | `/(team)/(tabs)/scoring/${id}/${currentIndividualMatch ?? 0}` |
 
@@ -338,16 +338,18 @@ Legend: **✅ BUILT** | **🔶 PARTIAL** | **❌ NOT STARTED**
 ### Scorekeeping — Match Start
 | Feature | Status | Notes |
 |---|---|---|
-| Coin flip modal (first match / not first) | ✅ BUILT | Steps: first_match → flip → result → accept/defer |
+| Coin flip modal (first match / not first) | ✅ BUILT | Steps: first_match → flip → result → accept/defer; Cancel button on every step |
 | Catchup wizard (starting mid-match) | ✅ BUILT | Retroactive data entry for prior matches |
-| Catchup: select starting match (1–5) | ✅ BUILT | |
+| Catchup: select starting match (1–5) | ✅ BUILT | Fresh match defaults to match 1 (skips select screen) |
 | Catchup: retro player + winner + racks | ✅ BUILT | |
 | Catchup: partial racks on starting match | ✅ BUILT | |
 | Catchup saves to DB (23-rule consistent) | ✅ BUILT | Upserts individual_matches |
 | Put-up screen (Realtime two-device) | ✅ BUILT | Supabase Realtime `postgres_changes` |
 | "Other team not started" message | ✅ BUILT | `opponentConnected` flag |
-| Dev bypass (triple-tap title, solo testing) | ✅ BUILT | Hidden; auto-fills both players from roster |
+| Dev bypass (triple-tap title, solo testing) | ✅ BUILT | Hidden; auto-fills two different players; sets skill levels on individual_match |
+| Stale put-up self-heal | ✅ BUILT | If team_match.status='scheduled' and individual_match already has both players, clears them on load |
 | Resume screen (select in-progress match) | ✅ BUILT | Shows all 5 slots, status, last resumed time |
+| Reset Match (dev/testing tool) | ✅ BUILT | On scoring index match card; deletes individual_matches + resets team_match to scheduled; only shown for non-scheduled matches |
 
 ### Scorekeeping — Active Match
 | Feature | Status | Notes |

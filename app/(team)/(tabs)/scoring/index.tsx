@@ -1,5 +1,6 @@
 import { useState, useCallback, useRef } from 'react';
 import {
+  Alert,
   FlatList,
   Pressable,
   StyleSheet,
@@ -40,7 +41,7 @@ const STATUS_LABELS: Record<ScorableStatus, string> = {
 };
 
 const ACTION_LABELS: Record<ScorableStatus, string> = {
-  scheduled: 'Set Lineup',
+  scheduled: 'Score Match',
   lineup_set: 'Start Scoring',
   in_progress: 'Continue Scoring',
 };
@@ -48,9 +49,11 @@ const ACTION_LABELS: Record<ScorableStatus, string> = {
 function ScorableMatchItem({
   match,
   onScheduledPress,
+  onResetPress,
 }: {
   match: ScorableMatch;
   onScheduledPress: (matchId: string, isHome: boolean) => void;
+  onResetPress: (matchId: string) => void;
 }) {
   const matchDate = new Date(match.scheduled_date);
 
@@ -151,6 +154,12 @@ function ScorableMatchItem({
         </Text>
         <Ionicons name="arrow-forward" size={20} color="#FFFFFF" />
       </Pressable>
+
+      {match.status !== 'scheduled' && (
+        <Pressable style={styles.resetButton} onPress={() => onResetPress(match.id)}>
+          <Text style={styles.resetButtonText}>Reset Match</Text>
+        </Pressable>
+      )}
     </Pressable>
   );
 }
@@ -168,6 +177,28 @@ export default function TeamScoringIndex() {
     pendingMatchId.current = matchId;
     pendingIsHome.current = isHome;
     setCoinFlipVisible(true);
+  };
+
+  const handleResetMatch = (matchId: string) => {
+    Alert.alert(
+      'Reset Match',
+      'This will delete all scoring data and return the match to Scheduled. Continue?',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Reset',
+          style: 'destructive',
+          onPress: async () => {
+            await supabase.from('individual_matches').delete().eq('team_match_id', matchId);
+            await supabase
+              .from('team_matches')
+              .update({ status: 'scheduled', home_score: 0, away_score: 0, finalized_by: null, finalized_at: null })
+              .eq('id', matchId);
+            fetchScorableMatches();
+          },
+        },
+      ]
+    );
   };
 
   const handleCoinFlipReady = (result: { firstMatch: boolean; ourTeamPutsUpFirst: boolean | null }) => {
@@ -243,7 +274,7 @@ export default function TeamScoringIndex() {
 
   return (
     <SafeAreaView style={styles.safeArea} edges={['top']}>
-      <CoinFlipModal visible={coinFlipVisible} onReady={handleCoinFlipReady} />
+      <CoinFlipModal visible={coinFlipVisible} onReady={handleCoinFlipReady} onCancel={() => setCoinFlipVisible(false)} />
       <View style={styles.headerBar}>
         <Text style={styles.headerTitle}>Scoring</Text>
       </View>
@@ -252,7 +283,7 @@ export default function TeamScoringIndex() {
         data={matches}
         keyExtractor={(item) => item.id}
         renderItem={({ item }) => (
-          <ScorableMatchItem match={item} onScheduledPress={handleScheduledPress} />
+          <ScorableMatchItem match={item} onScheduledPress={handleScheduledPress} onResetPress={handleResetMatch} />
         )}
         contentContainerStyle={styles.listContent}
         showsVerticalScrollIndicator={false}
@@ -408,5 +439,14 @@ const styles = StyleSheet.create({
     color: theme.colors.textSecondary,
     textAlign: 'center',
     lineHeight: 20,
+  },
+  resetButton: {
+    alignItems: 'center',
+    paddingVertical: 10,
+  },
+  resetButtonText: {
+    fontSize: 13,
+    color: '#F44336',
+    fontWeight: '500',
   },
 });
