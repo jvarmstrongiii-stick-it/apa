@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import {
   FlatList,
   Pressable,
@@ -7,7 +7,7 @@ import {
   View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { router, useFocusEffect } from 'expo-router';
+import { router, useFocusEffect, useLocalSearchParams } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { theme } from '../../../../src/constants/theme';
 import { supabase } from '../../../../src/lib/supabase';
@@ -53,6 +53,12 @@ const FILTER_OPTIONS: { label: string; value: MatchStatus | 'all' }[] = [
   { label: 'Finalized', value: 'finalized' },
 ];
 
+function splitDivisionName(name: string): { label: string; session: string } {
+  const m = name.match(/^(.*?)\s*((?:Spring|Fall|Summer|Winter)\s+\d{4}.*)$/i);
+  if (m) return { label: m[1].trim(), session: m[2].trim() };
+  return { label: name, session: '' };
+}
+
 function MatchItem({ match }: { match: TeamMatch }) {
   const matchDate = new Date(match.scheduled_date);
   const formattedDate = matchDate.toLocaleDateString('en-US', {
@@ -60,6 +66,7 @@ function MatchItem({ match }: { match: TeamMatch }) {
     day: 'numeric',
     year: 'numeric',
   });
+  const { label: divLabel, session: divSession } = splitDivisionName(match.division_name);
 
   return (
     <Pressable
@@ -108,17 +115,28 @@ function MatchItem({ match }: { match: TeamMatch }) {
       </View>
 
       <View style={styles.matchFooter}>
-        <Text style={styles.dateText}>{formattedDate}</Text>
-        <Text style={styles.divisionText}>{match.division_name}</Text>
+        <Text style={styles.dateText}>
+          {formattedDate}{divLabel ? `  ·  ${divLabel}` : ''}
+        </Text>
+        {divSession ? (
+          <Text style={styles.divisionText}>{divSession}</Text>
+        ) : null}
       </View>
     </Pressable>
   );
 }
 
 export default function AdminMatchesIndex() {
+  const { filter: filterParam } = useLocalSearchParams<{ filter?: string }>();
   const [matches, setMatches] = useState<TeamMatch[]>([]);
-  const [activeFilter, setActiveFilter] = useState<MatchStatus | 'all'>('all');
+  const [activeFilter, setActiveFilter] = useState<MatchStatus | 'all'>(
+    (filterParam as MatchStatus | 'all') ?? 'all'
+  );
   const [refreshing, setRefreshing] = useState(false);
+
+  useEffect(() => {
+    if (filterParam) setActiveFilter(filterParam as MatchStatus | 'all');
+  }, [filterParam]);
 
   const fetchMatches = useCallback(async () => {
     const { data, error } = await supabase
@@ -346,8 +364,8 @@ const styles = StyleSheet.create({
     color: theme.colors.textSecondary,
   },
   matchFooter: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
+    flexDirection: 'column',
+    gap: 2,
     borderTopWidth: 1,
     borderTopColor: theme.colors.border,
     paddingTop: 10,

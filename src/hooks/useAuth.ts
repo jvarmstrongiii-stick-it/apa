@@ -140,8 +140,8 @@ export function useAuth() {
 
       const profile = await fetchProfile(user.id);
 
-      if (!profile || profile.role !== 'admin') {
-        // Not an admin -- sign them back out immediately
+      if (!profile || (profile.role !== 'admin' && profile.role !== 'lo')) {
+        // Not an admin or LO -- sign them back out immediately
         await supabase.auth.signOut();
         setState({ ...initialState, isLoading: false });
         throw new Error('Access denied. This account does not have admin privileges.');

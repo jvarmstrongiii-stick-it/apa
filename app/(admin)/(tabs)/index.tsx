@@ -34,36 +34,17 @@ function SummaryCard({ title, value, icon, color, onPress }: SummaryCardProps) {
   );
 }
 
-interface QuickActionProps {
-  title: string;
-  icon: keyof typeof Ionicons.glyphMap;
-  onPress: () => void;
-}
-
-function QuickAction({ title, icon, onPress }: QuickActionProps) {
-  return (
-    <Pressable
-      style={({ pressed }) => [
-        styles.quickAction,
-        pressed && styles.cardPressed,
-      ]}
-      onPress={onPress}
-    >
-      <Ionicons name={icon} size={24} color={theme.colors.primary} />
-      <Text style={styles.quickActionText}>{title}</Text>
-      <Ionicons name="chevron-forward" size={20} color={theme.colors.textSecondary} />
-    </Pressable>
-  );
-}
-
 export default function AdminDashboard() {
-  const { profile } = useAuthContext();
+  useAuthContext();
   const [loading, setLoading] = useState(true);
-  const [summaryData, setSummaryData] = useState({
-    activeLeagues: 0,
-    pendingMatches: 0,
-    openDisputes: 0,
-    recentImports: 0,
+  const [leagueName, setLeagueName] = useState('');
+  const [counts, setCounts] = useState({
+    divisions: 0,
+    scheduled: 0,
+    in_progress: 0,
+    completed: 0,
+    finalized: 0,
+    disputed: 0,
   });
 
   useFocusEffect(
@@ -73,19 +54,54 @@ export default function AdminDashboard() {
       async function fetchSummary() {
         setLoading(true);
         try {
-          const [leagues, matches, disputes, imports] = await Promise.all([
-            supabase.from('leagues').select('id', { count: 'exact', head: true }).eq('is_active', true),
-            supabase.from('team_matches').select('id', { count: 'exact', head: true }).neq('match_status', 'finalized'),
-            supabase.from('disputes').select('id', { count: 'exact', head: true }).eq('status', 'open'),
-            supabase.from('imports').select('id', { count: 'exact', head: true }),
-          ]);
+          const { data: league } = await supabase
+            .from('leagues')
+            .select('id, name')
+            .eq('is_active', true)
+            .limit(1)
+            .single();
+
+          const leagueId = league?.id;
+
+          const [divisions, scheduled, active, completed, finalized, disputed] =
+            await Promise.all([
+              leagueId
+                ? supabase
+                    .from('divisions')
+                    .select('id', { count: 'exact', head: true })
+                    .eq('league_id', leagueId)
+                : Promise.resolve({ count: 0 }),
+              supabase
+                .from('team_matches')
+                .select('id', { count: 'exact', head: true })
+                .eq('status', 'scheduled'),
+              supabase
+                .from('team_matches')
+                .select('id', { count: 'exact', head: true })
+                .eq('status', 'in_progress'),
+              supabase
+                .from('team_matches')
+                .select('id', { count: 'exact', head: true })
+                .eq('status', 'completed'),
+              supabase
+                .from('team_matches')
+                .select('id', { count: 'exact', head: true })
+                .eq('status', 'finalized'),
+              supabase
+                .from('team_matches')
+                .select('id', { count: 'exact', head: true })
+                .eq('status', 'disputed'),
+            ]);
 
           if (!cancelled) {
-            setSummaryData({
-              activeLeagues: leagues.count ?? 0,
-              pendingMatches: matches.count ?? 0,
-              openDisputes: disputes.count ?? 0,
-              recentImports: imports.count ?? 0,
+            setLeagueName(league?.name ?? '');
+            setCounts({
+              divisions: divisions.count ?? 0,
+              scheduled: scheduled.count ?? 0,
+              in_progress: active.count ?? 0,
+              completed: completed.count ?? 0,
+              finalized: finalized.count ?? 0,
+              disputed: disputed.count ?? 0,
             });
           }
         } catch (err) {
@@ -108,66 +124,54 @@ export default function AdminDashboard() {
         showsVerticalScrollIndicator={false}
       >
         <View style={styles.header}>
-          <Text style={styles.greeting}>Welcome back,</Text>
-          <Text style={styles.adminName}>
-            {profile?.display_name ?? 'Admin'}
+          <Text style={styles.greeting}>League Operator</Text>
+          <Text style={styles.leagueName}>
+            {loading ? '...' : leagueName || 'No Active League'}
           </Text>
         </View>
 
         <View style={styles.summaryGrid}>
           <SummaryCard
-            title="Active Leagues"
-            value={summaryData.activeLeagues}
-            icon="trophy"
+            title="Divisions"
+            value={loading ? '—' : counts.divisions}
+            icon="layers-outline"
             color="#4CAF50"
-            onPress={() => router.push('/(admin)/(tabs)/leagues')}
+            onPress={() => router.push('/(admin)/(tabs)/divisions')}
           />
           <SummaryCard
-            title="Pending Matches"
-            value={summaryData.pendingMatches}
-            icon="time"
+            title="Scheduled"
+            value={loading ? '—' : counts.scheduled}
+            icon="calendar-outline"
             color="#2196F3"
-            onPress={() => router.push('/(admin)/(tabs)/matches')}
+            onPress={() => router.push('/(admin)/(tabs)/matches?filter=scheduled')}
           />
           <SummaryCard
-            title="Open Disputes"
-            value={summaryData.openDisputes}
-            icon="alert-circle"
+            title="Active"
+            value={loading ? '—' : counts.in_progress}
+            icon="play-circle-outline"
             color="#FF9800"
+            onPress={() => router.push('/(admin)/(tabs)/matches?filter=in_progress')}
           />
           <SummaryCard
-            title="Recent Imports"
-            value={summaryData.recentImports}
-            icon="cloud-done"
-            color="#9C27B0"
-            onPress={() => router.push('/(admin)/(tabs)/import')}
+            title="Completed"
+            value={loading ? '—' : counts.completed}
+            icon="checkmark-circle-outline"
+            color="#009688"
+            onPress={() => router.push('/(admin)/(tabs)/matches?filter=completed')}
           />
-        </View>
-
-        <Text style={styles.sectionTitle}>Quick Actions</Text>
-
-        <View style={styles.quickActions}>
-          <QuickAction
-            title="Create New League"
-            icon="add-circle-outline"
-            onPress={() => router.push('/(admin)/(tabs)/leagues/create')}
+          <SummaryCard
+            title="Finalized"
+            value={loading ? '—' : counts.finalized}
+            icon="lock-closed-outline"
+            color="#607D8B"
+            onPress={() => router.push('/(admin)/(tabs)/matches?filter=finalized')}
           />
-          <QuickAction
-            title="Import Rosters"
-            icon="cloud-upload-outline"
-            onPress={() => router.push('/(admin)/(tabs)/import')}
-          />
-          <QuickAction
-            title="Review Disputes"
+          <SummaryCard
+            title="Disputed"
+            value={loading ? '—' : counts.disputed}
             icon="alert-circle-outline"
-            onPress={() => {
-              // TODO: Navigate to disputes screen
-            }}
-          />
-          <QuickAction
-            title="View All Matches"
-            icon="list-outline"
-            onPress={() => router.push('/(admin)/(tabs)/matches')}
+            color="#F44336"
+            onPress={() => router.push('/(admin)/(tabs)/matches?filter=disputed')}
           />
         </View>
       </ScrollView>
@@ -196,7 +200,7 @@ const styles = StyleSheet.create({
     color: theme.colors.textSecondary,
     marginBottom: 2,
   },
-  adminName: {
+  leagueName: {
     fontSize: 28,
     fontWeight: '700',
     color: theme.colors.text,
@@ -238,31 +242,5 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: theme.colors.textSecondary,
     fontWeight: '500',
-  },
-  sectionTitle: {
-    fontSize: 20,
-    fontWeight: '700',
-    color: theme.colors.text,
-    marginBottom: 16,
-  },
-  quickActions: {
-    gap: 8,
-  },
-  quickAction: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: theme.colors.surface,
-    borderRadius: 12,
-    padding: 18,
-    borderWidth: 1,
-    borderColor: theme.colors.border,
-    minHeight: 56,
-    gap: 14,
-  },
-  quickActionText: {
-    flex: 1,
-    fontSize: 16,
-    fontWeight: '600',
-    color: theme.colors.text,
   },
 });

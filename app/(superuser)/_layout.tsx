@@ -3,7 +3,7 @@ import { Redirect, Stack } from 'expo-router';
 import { useAuthContext } from '../../src/providers/AuthProvider';
 import { theme } from '../../src/constants/theme';
 
-export default function AdminLayout() {
+export default function SuperuserLayout() {
   const { user, role, isLoading } = useAuthContext();
 
   if (isLoading) {
@@ -14,8 +14,8 @@ export default function AdminLayout() {
     );
   }
 
-  // Route guard: only LO role can access this layout
-  if (!user || role !== 'lo') {
+  // Route guard: only the superuser (role = 'admin') can access this layout
+  if (!user || role !== 'admin') {
     return <Redirect href="/(auth)/login" />;
   }
 

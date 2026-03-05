@@ -83,8 +83,55 @@ export default function PutUpScreen() {
   const [roster, setRoster] = useState<RosterPlayer[]>([]);
   const [opponentPlayer, setOpponentPlayer] = useState<PlayerDisplay | null>(null);
   const [saving, setSaving] = useState(false);
+  const [opponentConnected, setOpponentConnected] = useState(false);
 
   const channelRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
+
+  // ─── Dev bypass (triple-tap header title → auto-fill both players) ────────
+  const [devTapCount, setDevTapCount] = useState(0);
+  const devTapTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const handleDevTap = () => {
+    if (devTapTimer.current) clearTimeout(devTapTimer.current);
+    setDevTapCount(c => {
+      const next = c + 1;
+      if (next >= 3) {
+        handleDevBypass();
+        return 0;
+      }
+      devTapTimer.current = setTimeout(() => setDevTapCount(0), 1500);
+      return next;
+    });
+  };
+
+  const handleDevBypass = async () => {
+    if (!indMatch || !roster.length || !ourSide) return;
+    const ourPlayer = roster[0];
+
+    // Fetch one player from the opponent team for the other slot
+    let opponentPlayerId = ourPlayer.id; // fallback (avoids nullable column issues)
+    if (opponentTeamId) {
+      const { data: oppRoster } = await supabase
+        .from('team_players')
+        .select('player_id')
+        .eq('team_id', opponentTeamId)
+        .limit(1);
+      if (oppRoster && oppRoster.length > 0) {
+        opponentPlayerId = oppRoster[0].player_id;
+      }
+    }
+
+    const homeId = ourSide === 'home' ? ourPlayer.id : opponentPlayerId;
+    const awayId = ourSide === 'away' ? ourPlayer.id : opponentPlayerId;
+
+    const { data: updated } = await supabase
+      .from('individual_matches')
+      .update({ home_player_id: homeId, away_player_id: awayId })
+      .eq('id', indMatch.id)
+      .select('id, home_player_id, away_player_id, put_up_team')
+      .single();
+    if (updated) setIndMatch(updated as IndividualMatchRecord);
+  };
 
   // ─── Fetch opponent player details ───────────────────────────────────────
   const fetchOpponentPlayer = useCallback(
@@ -153,7 +200,7 @@ export default function PutUpScreen() {
           'matches_played, player:players!player_id(id, first_name, last_name, skill_level)'
         )
         .eq('team_id', teamId)
-        .is('left_at', null);
+        .eq('is_active', true);
 
       const mapped: RosterPlayer[] = (rosterData ?? [])
         .map((tp: any) => ({
@@ -218,6 +265,7 @@ export default function PutUpScreen() {
           filter: `id=eq.${indMatch.id}`,
         },
         async (payload) => {
+          setOpponentConnected(true);
           const updated = payload.new as IndividualMatchRecord;
           setIndMatch(updated);
           await fetchOpponentPlayer(updated, ourSide, opponentTeamId);
@@ -343,10 +391,13 @@ export default function PutUpScreen() {
         return (
           <View style={styles.centered}>
             <ActivityIndicator size="large" color={theme.colors.primary} />
-            <Text style={styles.waitTitle}>Opponent is choosing...</Text>
+            <Text style={styles.waitTitle}>
+              {opponentConnected ? 'Opponent is choosing...' : 'Other team has not started the match'}
+            </Text>
             <Text style={styles.waitBody}>
-              Waiting for the other team to put up their player for Match{' '}
-              {matchOrder}.
+              {opponentConnected
+                ? `Waiting for the other team to put up their player for Match ${matchOrder}.`
+                : 'Waiting for the other team to open the app and start the match.'}
             </Text>
           </View>
         );
@@ -387,10 +438,14 @@ export default function PutUpScreen() {
         return (
           <View style={styles.centered}>
             <ActivityIndicator size="large" color={theme.colors.primary} />
-            <Text style={styles.waitTitle}>Waiting for opponent...</Text>
+            <Text style={styles.waitTitle}>
+              {opponentConnected ? 'Waiting for opponent...' : 'Other team has not started the match'}
+            </Text>
             <Text style={styles.waitBody}>
               You put up {ourPlayerName ?? 'your player'}.{'\n'}
-              Waiting for the other team to respond.
+              {opponentConnected
+                ? 'Waiting for the other team to respond.'
+                : 'Waiting for the other team to open the app.'}
             </Text>
           </View>
         );
@@ -420,10 +475,12 @@ export default function PutUpScreen() {
         >
           <Ionicons name="arrow-back" size={24} color={theme.colors.text} />
         </Pressable>
-        <View style={styles.headerCenter}>
+        <Pressable style={styles.headerCenter} onPress={handleDevTap} hitSlop={8}>
           <Text style={styles.headerTitle}>Match {matchOrder} of 5</Text>
-          <Text style={styles.headerSub}>Put Up</Text>
-        </View>
+          <Text style={styles.headerSub}>
+            Put Up{devTapCount > 0 ? ' ' + '·'.repeat(devTapCount) : ''}
+          </Text>
+        </Pressable>
         <View style={styles.headerButton} />
       </View>
 

@@ -19,8 +19,9 @@ interface PlayerData {
 }
 
 interface MatchImportData {
-  divisionName: string;                      // "435" or "8-BALL Warminster…"
-  gameFormat:   'eight_ball' | 'nine_ball';
+  divisionName:   string;                    // "435" or "8-BALL Warminster…"
+  divisionNumber: string;                    // "435" (always 3 digits)
+  gameFormat:     'eight_ball' | 'nine_ball';
   weekNumber:   number;
   matchDate:    string;                      // YYYY-MM-DD
   homeTeam:     { number: string; name: string };
@@ -66,7 +67,7 @@ function parseName(fullName: string): { firstName: string; lastName: string } {
 function parseAPAScoresheet(text: string): MatchImportData | null {
   // 1. Week + date (pdfjs merges: "For Week #:8/16On02/17/2026")
   const weekDateM = text.match(/For\s*Week\s*#:\s*(\d+)\s*\/\s*\d+\s*On\s*(\d{2}\/\d{2}\/\d{4})/);
-  if (!weekDateM) return null;
+  if (!weekDateM) throw new Error('APA parse failed: could not find week/date (expected "For Week #:N/N OnMM/DD/YYYY"). Snippet: ' + text.slice(0, 200));
   const weekNumber = parseInt(weekDateM[1], 10);
   const matchDate  = convertDate(weekDateM[2]);
 
@@ -79,33 +80,38 @@ function parseAPAScoresheet(text: string): MatchImportData | null {
   // 3. Teams ("Team:Home TeamWe Came To Play43502")
   const homeM = text.match(/Team:\s*Home\s*Team\s*(.*?)\s*(\d{5})(?!\d)/);
   const awayM  = text.match(/Team:\s*Visiting\s*Team\s*(.*?)\s*(\d{5})(?!\d)/);
-  if (!homeM || !awayM) return null;
+  if (!homeM) throw new Error('APA parse failed: could not find home team line (expected "Team:Home Team<name><5-digit#>"). Snippet: ' + text.slice(0, 400));
+  if (!awayM) throw new Error('APA parse failed: could not find visiting team line (expected "Team:Visiting Team<name><5-digit#>"). Snippet: ' + text.slice(0, 400));
   const homeTeam = { number: homeM[2], name: homeM[1].trim() };
   const awayTeam = { number: awayM[2], name: awayM[1].trim() };
+  const divisionNumber = homeTeam.number.slice(0, 3);
 
   // 4. Player section boundaries
-  const homeHeaderIdx = text.search(/SL\s*\*?\s*MP\s*Player\s*#?\s*Name/i);
+  const homeHeaderIdx = text.search(/SL\s*MP\s*Player\s*#?\s*Name/i);
   const visitingIdx   = text.search(/Team:\s*Visiting\s*Team/i);
-  if (homeHeaderIdx < 0 || visitingIdx < 0 || homeHeaderIdx >= visitingIdx) return null;
+  if (homeHeaderIdx < 0) throw new Error('APA parse failed: could not find home player table header (SL MP Player# Name).');
+  if (visitingIdx < 0) throw new Error('APA parse failed: could not find visiting team section.');
+  if (homeHeaderIdx >= visitingIdx) throw new Error(`APA parse failed: home header (pos ${homeHeaderIdx}) appears after visiting section (pos ${visitingIdx}) — unexpected page layout.`);
 
   // Advance past the header to the first digit
-  const homeHeaderMatch = text.slice(homeHeaderIdx).match(/SL\s*\*?\s*MP\s*Player\s*#?\s*Name/i);
+  const homeHeaderMatch = text.slice(homeHeaderIdx).match(/SL\s*MP\s*Player\s*#?\s*Name/i);
   const homeBodyStart = homeHeaderIdx + (homeHeaderMatch ? homeHeaderMatch[0].length : 0);
   const homeBody = text.slice(homeBodyStart, visitingIdx);
 
   const visitingBlock  = text.slice(visitingIdx);
-  const awayHeaderIdx  = visitingBlock.search(/SL\s*(?:\*?\s*MP\s*)?Player\s*#?\s*Name/i);
-  if (awayHeaderIdx < 0) return null;
-  const awayHeaderMatch = visitingBlock.slice(awayHeaderIdx).match(/SL\s*(?:\*?\s*MP\s*)?Player\s*#?\s*Name/i);
+  const awayHeaderIdx  = visitingBlock.search(/SL\s*(?:MP\s*)?Player\s*#?\s*Name/i);
+  if (awayHeaderIdx < 0) throw new Error('APA parse failed: could not find away player table header inside visiting section. Visiting block snippet: ' + visitingBlock.slice(0, 400));
+  const awayHeaderMatch = visitingBlock.slice(awayHeaderIdx).match(/SL\s*(?:MP\s*)?Player\s*#?\s*Name/i);
   const awayBodyStart  = awayHeaderIdx + (awayHeaderMatch ? awayHeaderMatch[0].length : 0);
   const awayBody = visitingBlock.slice(awayBodyStart);
 
   const homePlayers = parseColumnMajorPlayers(homeBody);
   const awayPlayers = parseColumnMajorPlayers(awayBody);
 
-  if (!homePlayers.length || !awayPlayers.length) return null;
+  if (!homePlayers.length) throw new Error('APA parse failed: no valid home players found. Home body snippet: ' + homeBody.slice(0, 200));
+  if (!awayPlayers.length) throw new Error('APA parse failed: no valid away players found. Away body snippet: ' + awayBody.slice(0, 200));
 
-  return { divisionName, gameFormat, weekNumber, matchDate, homeTeam, awayTeam, homePlayers, awayPlayers };
+  return { divisionName, divisionNumber, gameFormat, weekNumber, matchDate, homeTeam, awayTeam, homePlayers, awayPlayers };
 }
 
 // Column-major digit block: [N×SL][N×MP][N×Member#(5)] = 7 chars/player
@@ -116,7 +122,7 @@ function parseColumnMajorPlayers(section: string): PlayerData[] {
   //   * = incomplete information on file
   //   N = not paid  (only strip when immediately before a digit to avoid
   //                  corrupting names that also contain 'N')
-  const cleanSection = section.replace(/\*/g, '').replace(/N(?=\d)/g, '');
+  const cleanSection = section.replace(/N(?=\d)/g, '');
 
   const players: PlayerData[] = [];
   let pos = 0;
@@ -287,6 +293,7 @@ function parseAdminUploadFormat(text: string): MatchImportData | null {
 
   return {
     divisionName,
+    divisionNumber: divisionName,  // custom format: divisionName IS the number (e.g. "435")
     gameFormat,
     weekNumber,
     matchDate,
@@ -317,10 +324,9 @@ function buildPlaceholderMemberNumber(teamNumber: string, fullName: string): str
 
 function detectAndParse(text: string): MatchImportData {
   // APA official scoresheet: pdfjs extracts "For Week #:" near the top
-  if (text.includes('For Week #:') && (text.includes('Team:Home Team') || text.includes('Team:\u0000Home Team'))) {
-    const result = parseAPAScoresheet(text);
-    if (!result) throw new Error('PDF appears to be an APA scoresheet but could not be parsed. Verify the file is a valid team scoresheet.');
-    return result;
+  if (text.includes('For Week #:') && text.includes('Team:Home Team')) {
+    // parseAPAScoresheet now throws with a specific message on any failure.
+    return parseAPAScoresheet(text);
   }
 
   const result = parseAdminUploadFormat(text);
@@ -334,19 +340,25 @@ function detectAndParse(text: string): MatchImportData {
 
 type DB = ReturnType<typeof createClient>;
 
-async function findOrCreateDivision(db: DB, leagueId: string, name: string): Promise<string> {
+async function findOrCreateDivision(db: DB, leagueId: string, name: string, divisionNumber: string): Promise<string> {
   const { data } = await db
     .from('divisions')
-    .select('id')
+    .select('id, division_number')
     .eq('league_id', leagueId)
     .eq('name', name)
     .maybeSingle();
 
-  if (data) return data.id;
+  if (data) {
+    // Backfill division_number if not yet set
+    if (!data.division_number && divisionNumber) {
+      await db.from('divisions').update({ division_number: divisionNumber }).eq('id', data.id);
+    }
+    return data.id;
+  }
 
   const { data: created, error } = await db
     .from('divisions')
-    .insert({ league_id: leagueId, name, day_of_week: 0 })
+    .insert({ league_id: leagueId, name, division_number: divisionNumber, day_of_week: 0 })
     .select('id')
     .single();
 
@@ -386,6 +398,7 @@ async function findOrCreateTeamMatch(
   awayTeamId: string,
   matchDate: string,
   weekNumber: number,
+  importId: string,
 ): Promise<string> {
   const { data } = await db
     .from('team_matches')
@@ -406,7 +419,8 @@ async function findOrCreateTeamMatch(
       away_team_id: awayTeamId,
       match_date:   matchDate,
       week_number:  weekNumber,
-      status:       'scheduled',
+      status:       'imported',
+      import_id:    importId,
     })
     .select('id')
     .single();
@@ -490,11 +504,15 @@ serve(async (req: Request) => {
     return new Response('ok', { headers: corsHeaders });
   }
 
+  // Declared outside try so the catch block can mark the import as failed.
+  let importId: string | undefined;
+  let supabaseAdmin: ReturnType<typeof createClient> | undefined;
+
   try {
     const authHeader = req.headers.get('Authorization');
     if (!authHeader) throw new Error('Missing authorization');
 
-    const supabaseAdmin = createClient(
+    supabaseAdmin = createClient(
       Deno.env.get('SUPABASE_URL') ?? '',
       Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '',
     );
@@ -515,12 +533,24 @@ serve(async (req: Request) => {
       .eq('id', caller.id)
       .single();
 
-    if (callerProfile?.role !== 'admin') throw new Error('Only admins can import data');
+    if (!['admin', 'lo'].includes(callerProfile?.role)) throw new Error('Only league operators can import data');
 
-    const { importId, storagePath, leagueId } = await req.json();
-    if (!importId || !storagePath || !leagueId) {
-      throw new Error('Missing required fields: importId, storagePath, leagueId');
+    const body = await req.json();
+    importId = body.importId;
+    const { storagePath } = body;
+    if (!importId || !storagePath) {
+      throw new Error('Missing required fields: importId, storagePath');
     }
+
+    // Auto-detect the active league — the LO operates in a single league.
+    const { data: leagueRow, error: leagueErr } = await supabaseAdmin
+      .from('leagues')
+      .select('id')
+      .eq('is_active', true)
+      .limit(1)
+      .single();
+    if (leagueErr || !leagueRow) throw new Error('No active league found. Please create a league first.');
+    const leagueId: string = leagueRow.id;
 
     await supabaseAdmin.from('imports').update({ status: 'processing' }).eq('id', importId);
 
@@ -530,30 +560,44 @@ serve(async (req: Request) => {
       .download(storagePath);
     if (dlErr) throw new Error(`Storage download failed: ${dlErr.message}`);
 
-    // Extract text
+    // Extract text — process one page at a time so that two-copy PDFs
+    // (each team gets their own printed copy on a separate page) don't
+    // cause the parser to consume data from the second copy.
     const buf = await fileData.arrayBuffer();
     const pdf = await getDocumentProxy(new Uint8Array(buf));
-    const { text } = await extractText(pdf, { mergePages: true });
+    const { text: pages } = await extractText(pdf, { mergePages: false });
+    const pageList: string[] = Array.isArray(pages) ? pages : [pages as unknown as string];
 
-    // Parse
-    const match = detectAndParse(text);
+    // Parse — try each page, use the first successful result.
+    // Strip null bytes that pdfjs sometimes inserts (e.g. "Team:\u0000Home Team").
+    let match: MatchImportData | null = null;
+    let lastParseError = 'No pages could be parsed.';
+    for (const pageText of pageList) {
+      try {
+        match = detectAndParse(pageText.replace(/\u0000/g, '').replace(/\*/g, ''));
+        break;
+      } catch (e: unknown) {
+        lastParseError = e instanceof Error ? e.message : String(e);
+      }
+    }
+    if (!match) throw new Error(lastParseError);
 
     let processedRows = 0;
     let errorRows     = 0;
 
     try {
-      const divisionId = await findOrCreateDivision(supabaseAdmin, leagueId, match.divisionName);
+      const divisionId = await findOrCreateDivision(supabaseAdmin, leagueId, match.divisionName, match.divisionNumber);
       const homeTeamId = await findOrCreateTeam(supabaseAdmin, divisionId, match.homeTeam.number, match.homeTeam.name);
       const awayTeamId = await findOrCreateTeam(supabaseAdmin, divisionId, match.awayTeam.number, match.awayTeam.name);
-      await findOrCreateTeamMatch(supabaseAdmin, divisionId, homeTeamId, awayTeamId, match.matchDate, match.weekNumber);
+      await findOrCreateTeamMatch(supabaseAdmin, divisionId, homeTeamId, awayTeamId, match.matchDate, match.weekNumber, importId);
 
-      const allPlayers: Array<{ player: PlayerData; teamId: string; rowLabel: string }> = [
-        ...match.homePlayers.map((p, i) => ({ player: p, teamId: homeTeamId, rowLabel: `home-${i + 1}` })),
-        ...match.awayPlayers.map((p, i) => ({ player: p, teamId: awayTeamId, rowLabel: `away-${i + 1}` })),
+      const allPlayers: Array<{ player: PlayerData; teamId: string; team: 'home' | 'away' }> = [
+        ...match.homePlayers.map((p) => ({ player: p, teamId: homeTeamId, team: 'home' as const })),
+        ...match.awayPlayers.map((p) => ({ player: p, teamId: awayTeamId, team: 'away' as const })),
       ];
 
       for (let i = 0; i < allPlayers.length; i++) {
-        const { player, teamId } = allPlayers[i];
+        const { player, teamId, team } = allPlayers[i];
         try {
           const playerId = await findOrCreatePlayer(supabaseAdmin, player, match.gameFormat);
           await upsertTeamPlayer(supabaseAdmin, teamId, playerId, player.matchesPlayed);
@@ -561,7 +605,7 @@ serve(async (req: Request) => {
           await supabaseAdmin.from('import_rows').insert({
             import_id:  importId,
             row_number: i + 1,
-            raw_data:   player as unknown as Record<string, unknown>,
+            raw_data:   { ...player, team } as unknown as Record<string, unknown>,
             status:     'success',
           });
           processedRows++;
@@ -570,7 +614,7 @@ serve(async (req: Request) => {
           await supabaseAdmin.from('import_rows').insert({
             import_id:     importId,
             row_number:    i + 1,
-            raw_data:      player as unknown as Record<string, unknown>,
+            raw_data:      { ...player, team } as unknown as Record<string, unknown>,
             status:        'error',
             error_message: msg,
           });
@@ -606,6 +650,25 @@ serve(async (req: Request) => {
     );
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
+
+    // Always mark the import as failed so it doesn't stay stuck in 'processing'.
+    if (importId && supabaseAdmin) {
+      await supabaseAdmin.from('imports').update({
+        status:       'failed',
+        error_rows:   1,
+        completed_at: new Date().toISOString(),
+      }).eq('id', importId);
+
+      // Record the error as a row so it's visible in the import detail view.
+      await supabaseAdmin.from('import_rows').insert({
+        import_id:     importId,
+        row_number:    0,
+        raw_data:      { error: message },
+        status:        'error',
+        error_message: message,
+      });
+    }
+
     return new Response(
       JSON.stringify({ success: false, error: message }),
       { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 200 },

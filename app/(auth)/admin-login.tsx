@@ -72,9 +72,13 @@ export default function AdminLoginScreen() {
     setIsSubmitting(true);
 
     try {
-      await signInAdmin(email.trim(), password);
-      // Navigate immediately; biometric opt-in can happen later in settings
-      router.replace('/(admin)/(tabs)');
+      const { profile } = await signInAdmin(email.trim(), password);
+      // Route based on role: admin (superuser) → superuser dashboard, lo → LO dashboard
+      if (profile?.role === 'admin') {
+        router.replace('/(superuser)/(tabs)');
+      } else {
+        router.replace('/(admin)/(tabs)');
+      }
     } catch (err: any) {
       setError(err?.message ?? 'Sign in failed. Please check your credentials.');
     } finally {

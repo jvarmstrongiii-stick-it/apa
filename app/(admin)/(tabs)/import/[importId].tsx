@@ -18,6 +18,7 @@ type RowStatus = 'success' | 'error' | 'skipped';
 interface ImportRow {
   row_number: number;
   status: RowStatus;
+  team: 'home' | 'away' | null;
   data_summary: string;
   error_message: string | null;
 }
@@ -31,6 +32,18 @@ interface ImportDetail {
   error_count: number;
   skipped_count: number;
   rows: ImportRow[];
+}
+
+function formatFilename(raw: string): string {
+  return raw
+    .replace(/^Scoresheet\s*/i, '')
+    .replace(/\.pdf$/i, '')
+    .replace(/([a-zA-Z])(\d)/g, '$1 $2')
+    .replace(/(\d)([a-zA-Z])/g, '$1 $2')
+    .replace(/([a-z])([A-Z])/g, '$1 $2')
+    .replace(/([a-zA-Z\d])\s*vs\s*/gi, '$1 vs ')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 const ROW_STATUS_COLORS: Record<RowStatus, string> = {
@@ -68,14 +81,22 @@ export default function ImportResultsScreen() {
 
       const rows: ImportRow[] = (data.import_rows ?? [])
         .sort((a: any, b: any) => a.row_number - b.row_number)
-        .map((r: any) => ({
-          row_number: r.row_number,
-          status: r.status === 'pending' ? 'skipped' : r.status,
-          data_summary: r.raw_data
-            ? Object.values(r.raw_data).join(', ').slice(0, 80)
-            : `Row ${r.row_number}`,
-          error_message: r.error_message,
-        }));
+        .map((r: any) => {
+          const d = r.raw_data ?? {};
+          const parts = [
+            d.fullName,
+            d.skillLevel != null ? `SL ${d.skillLevel}` : null,
+            d.matchesPlayed != null ? `MP ${d.matchesPlayed}` : null,
+            d.memberNumber ? `#${d.memberNumber}` : null,
+          ].filter(Boolean);
+          return {
+            row_number: r.row_number,
+            status: r.status === 'pending' ? 'skipped' : r.status,
+            team: (d.team as 'home' | 'away') ?? null,
+            data_summary: parts.length ? parts.join(' · ') : `Row ${r.row_number}`,
+            error_message: r.error_message,
+          };
+        });
 
       const skippedCount = rows.filter((r) => r.status === 'skipped').length;
 
@@ -142,8 +163,8 @@ export default function ImportResultsScreen() {
       <View style={styles.summaryCard}>
         <View style={styles.fileRow}>
           <Ionicons name="document-outline" size={18} color={theme.colors.textSecondary} />
-          <Text style={styles.filenameText} numberOfLines={1}>
-            {importData.filename}
+          <Text style={styles.filenameText}>
+            {formatFilename(importData.filename)}
           </Text>
         </View>
 
@@ -177,12 +198,14 @@ export default function ImportResultsScreen() {
       <View style={styles.filterRow}>
         {(
           [
-            { label: 'All', value: 'all' as const },
-            { label: 'Success', value: 'success' as const },
-            { label: 'Errors', value: 'error' as const },
-            { label: 'Skipped', value: 'skipped' as const },
+            { label: 'All', value: 'all' as const, always: true },
+            { label: 'Success', value: 'success' as const, always: true },
+            { label: 'Errors', value: 'error' as const, always: false },
+            { label: 'Skipped', value: 'skipped' as const, always: false },
           ] as const
-        ).map((filter) => (
+        )
+          .filter((f) => f.always || (f.value === 'error' ? importData.error_count > 0 : importData.skipped_count > 0))
+          .map((filter) => (
           <Pressable
             key={filter.value}
             style={[
@@ -216,7 +239,22 @@ export default function ImportResultsScreen() {
             />
             <View style={styles.rowContent}>
               <View style={styles.rowHeader}>
-                <Text style={styles.rowNumber}>Row {item.row_number}</Text>
+                <View style={styles.rowTitleRow}>
+                  <Text style={styles.rowNumber}>Row {item.row_number}</Text>
+                  {item.team != null && (
+                    <View style={[
+                      styles.teamBadge,
+                      { backgroundColor: item.team === 'home' ? '#2196F320' : '#FF980020' },
+                    ]}>
+                      <Text style={[
+                        styles.teamBadgeText,
+                        { color: item.team === 'home' ? '#2196F3' : '#FF9800' },
+                      ]}>
+                        {item.team === 'home' ? 'H' : 'A'}
+                      </Text>
+                    </View>
+                  )}
+                </View>
                 <Text
                   style={[
                     styles.rowStatus,
@@ -389,10 +427,24 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     marginBottom: 4,
   },
+  rowTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
   rowNumber: {
     fontSize: 14,
     fontWeight: '700',
     color: theme.colors.text,
+  },
+  teamBadge: {
+    borderRadius: 4,
+    paddingHorizontal: 6,
+    paddingVertical: 1,
+  },
+  teamBadgeText: {
+    fontSize: 12,
+    fontWeight: '700',
   },
   rowStatus: {
     fontSize: 12,

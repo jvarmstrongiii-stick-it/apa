@@ -1,5 +1,5 @@
 import { useState, useCallback } from 'react';
-import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, Alert, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router, useFocusEffect } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
@@ -148,6 +148,20 @@ export default function TeamDashboard() {
     }
   };
 
+  const handleLogout = () => {
+    Alert.alert('Log Out', 'Log out and return to the login screen?', [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Log Out',
+        style: 'destructive',
+        onPress: async () => {
+          await supabase.auth.signOut();
+          router.replace('/(auth)/login');
+        },
+      },
+    ]);
+  };
+
   return (
     <SafeAreaView style={styles.safeArea} edges={['top']}>
       <CoinFlipModal visible={coinFlipVisible} onReady={handleCoinFlipReady} />
@@ -166,6 +180,13 @@ export default function TeamDashboard() {
             </Text>
           </View>
           */}
+          <Pressable
+            style={({ pressed }) => [styles.logoutBtn, pressed && styles.buttonPressed]}
+            onPress={handleLogout}
+            hitSlop={12}
+          >
+            <Ionicons name="log-out-outline" size={26} color={theme.colors.textSecondary} />
+          </Pressable>
         </View>
 
         {/* Next Match Card */}
@@ -334,6 +355,22 @@ export default function TeamDashboard() {
               color={theme.colors.textSecondary}
             />
           </Pressable>
+
+          <Pressable
+            style={({ pressed }) => [
+              styles.actionButton,
+              pressed && styles.buttonPressed,
+            ]}
+            onPress={handleLogout}
+          >
+            <Ionicons name="log-out-outline" size={24} color={theme.colors.error} />
+            <Text style={[styles.actionText, { color: theme.colors.error }]}>Log Out</Text>
+            <Ionicons
+              name="chevron-forward"
+              size={20}
+              color={theme.colors.textSecondary}
+            />
+          </Pressable>
         </View>
       </ScrollView>
     </SafeAreaView>
@@ -358,6 +395,9 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     marginTop: 16,
     marginBottom: 24,
+  },
+  logoutBtn: {
+    padding: 4,
   },
   teamName: {
     fontSize: 28,

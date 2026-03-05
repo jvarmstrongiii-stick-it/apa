@@ -48,6 +48,27 @@ interface GameOverOption {
   special: 'eight_on_break' | 'break_and_run' | null;
 }
 
+interface Snapshot {
+  currentShooterIsBreaker: boolean;
+  isBreakTurn: boolean;
+  rackInnings: number;
+  totalInnings: number;
+  timeoutsHome: number;
+  timeoutsAway: number;
+  defShotsHome: number;
+  defShotsAway: number;
+  actionPhase: ActionPhase;
+  pendingRackWinner: Side | null;
+  timeoutActive: boolean;
+  timeoutExpired: boolean;
+  timeoutSecsLeft: number;
+  breakAndRunHome: boolean;
+  breakAndRunAway: boolean;
+  eightOnBreakHome: boolean;
+  eightOnBreakAway: boolean;
+  shooterName: string;
+}
+
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 /**
@@ -75,9 +96,9 @@ function timeoutsForSL(sl: number): number {
 const FOUL_OPTIONS: string[] = [
   'Scratch on Break',
   'Scratched',
+  'Cue Ball Left Table',
   'Hit Wrong Ball First',
-  'Legal Contact',
-  'No Rail Hit',
+  'Legal Contact — No Rail Hit',
 ];
 
 const GAME_OVER_BREAK: GameOverOption[] = [
@@ -150,6 +171,9 @@ export default function IndividualMatchScoringScreen() {
   // ── Action phase ─────────────────────────────────────────────────────────────
   const [actionPhase, setActionPhase] = useState<ActionPhase>('turn');
 
+  // ── Undo snapshot (one level deep) ───────────────────────────────────────────
+  const [lastSnapshot, setLastSnapshot] = useState<Snapshot | null>(null);
+
   // ── Timeout (per-turn, 60 s) ─────────────────────────────────────────────────
   const [timeoutActive, setTimeoutActive] = useState(false);
   const [timeoutExpired, setTimeoutExpired] = useState(false);
@@ -184,6 +208,11 @@ export default function IndividualMatchScoringScreen() {
       : gameFormat === '8-ball'
         ? GAME_OVER_NORMAL_8
         : GAME_OVER_NORMAL_9;
+
+  // "Scratch on Break" only applies on the breaker's first shot of the rack.
+  const foulOptions = isBreakTurn
+    ? FOUL_OPTIONS
+    : FOUL_OPTIONS.filter(f => f !== 'Scratch on Break');
 
   // ─── Load match data ─────────────────────────────────────────────────────────
 
@@ -286,6 +315,56 @@ export default function IndividualMatchScoringScreen() {
     timeoutFlash.setValue(1);
   }
 
+  // ─── Undo helpers ─────────────────────────────────────────────────────────────
+
+  function saveSnapshot() {
+    setLastSnapshot({
+      currentShooterIsBreaker,
+      isBreakTurn,
+      rackInnings,
+      totalInnings,
+      timeoutsHome,
+      timeoutsAway,
+      defShotsHome,
+      defShotsAway,
+      actionPhase,
+      pendingRackWinner,
+      timeoutActive,
+      timeoutExpired,
+      timeoutSecsLeft,
+      breakAndRunHome,
+      breakAndRunAway,
+      eightOnBreakHome,
+      eightOnBreakAway,
+      shooterName: currentPlayer.name,
+    });
+  }
+
+  function undoLastAction() {
+    if (!lastSnapshot) return;
+    const s = lastSnapshot;
+    setCurrentShooterIsBreaker(s.currentShooterIsBreaker);
+    setIsBreakTurn(s.isBreakTurn);
+    setRackInnings(s.rackInnings);
+    setTotalInnings(s.totalInnings);
+    setTimeoutsHome(s.timeoutsHome);
+    setTimeoutsAway(s.timeoutsAway);
+    setDefShotsHome(s.defShotsHome);
+    setDefShotsAway(s.defShotsAway);
+    setActionPhase(s.actionPhase);
+    setPendingRackWinner(s.pendingRackWinner);
+    setTimeoutActive(s.timeoutActive);
+    setTimeoutExpired(s.timeoutExpired);
+    setTimeoutSecsLeft(s.timeoutSecsLeft);
+    setBreakAndRunHome(s.breakAndRunHome);
+    setBreakAndRunAway(s.breakAndRunAway);
+    setEightOnBreakHome(s.eightOnBreakHome);
+    setEightOnBreakAway(s.eightOnBreakAway);
+    if (!s.timeoutActive && !s.timeoutExpired) stopTimeoutFlash();
+    setLastSnapshot(null);
+    resetInactivity();
+  }
+
   // ─── Rack helpers ────────────────────────────────────────────────────────────
 
   function initRack(breaker: Side) {
@@ -298,6 +377,7 @@ export default function IndividualMatchScoringScreen() {
     setActionPhase('turn');
     setTimeoutActive(false);
     setTimeoutExpired(false);
+    setLastSnapshot(null);
     stopTimeoutFlash();
     resetInactivity();
   }
@@ -325,10 +405,12 @@ export default function IndividualMatchScoringScreen() {
   // ─── Turn action handlers ────────────────────────────────────────────────────
 
   function handleTurnOver() {
+    saveSnapshot();
     endTurn();
   }
 
   function handleDefensiveShot() {
+    saveSnapshot();
     if (currentShooter === 'home') setDefShotsHome(d => d + 1);
     else setDefShotsAway(d => d + 1);
     endTurn();
@@ -339,12 +421,24 @@ export default function IndividualMatchScoringScreen() {
       Alert.alert('No Timeouts Left', `${currentPlayer.name} has no timeouts remaining this rack.`);
       return;
     }
+    saveSnapshot();
     if (currentShooter === 'home') setTimeoutsHome(t => t - 1);
     else setTimeoutsAway(t => t - 1);
     setTimeoutSecsLeft(60);
     setTimeoutExpired(false);
     setTimeoutActive(true);
     resetInactivity();
+  }
+
+  function endTimeout() {
+    setTimeoutActive(false);
+    setTimeoutSecsLeft(60);
+    resetInactivity();
+  }
+
+  function cancelTimeout() {
+    // Restore the timeout — it was called in error
+    undoLastAction();
   }
 
   function dismissTimeout() {
@@ -354,6 +448,7 @@ export default function IndividualMatchScoringScreen() {
   }
 
   function handleFoul(_foulType: string) {
+    saveSnapshot();
     // Foul ends the turn (ball-in-hand to opponent)
     endTurn();
   }
@@ -364,6 +459,7 @@ export default function IndividualMatchScoringScreen() {
    */
   function handleGameOver(winner: 'current' | 'opponent', special: string | null) {
     if (!currentShooter) return;
+    saveSnapshot();
 
     const rackWinner: Side =
       winner === 'current' ? currentShooter : (currentShooter === 'home' ? 'away' : 'home');
@@ -460,6 +556,22 @@ export default function IndividualMatchScoringScreen() {
     );
   }
 
+  // ─── Hand off helper ─────────────────────────────────────────────────────────
+
+  function handleHandOff() {
+    Alert.alert(
+      'Hand Off Scorekeeper',
+      'Pass the device to another teammate. Current rack progress will be lost — they can resume from the last completed rack.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Hand Off',
+          onPress: () => router.replace(`/(team)/(tabs)/scoring/${matchId}/resume`),
+        },
+      ]
+    );
+  }
+
   // ─── Render: Lag for break ───────────────────────────────────────────────────
 
   if (breakPlayer === null) {
@@ -514,7 +626,9 @@ export default function IndividualMatchScoringScreen() {
           <Text style={styles.headerTitle}>Match {matchIndex + 1} of 5</Text>
           <Text style={styles.headerSubtitle}>{gameFormat} · Rack {rackNumber}</Text>
         </View>
-        <View style={styles.headerButton} />
+        <Pressable style={styles.headerButton} onPress={handleHandOff} hitSlop={12}>
+          <Ionicons name="swap-horizontal-outline" size={24} color={theme.colors.textSecondary} />
+        </Pressable>
       </View>
 
       {/* ── Scoreboard ── */}
@@ -573,10 +687,26 @@ export default function IndividualMatchScoringScreen() {
       {(timeoutActive || timeoutExpired) && (
         <View style={[styles.timeoutBanner, timeoutExpired && styles.timeoutBannerExpired]}>
           {timeoutActive ? (
-            <>
-              <Text style={styles.timeoutLabel}>TIME OUT</Text>
-              <Text style={styles.timeoutCountdown}>{timeoutSecsLeft}s</Text>
-            </>
+            <View style={styles.timeoutActiveInner}>
+              <View style={styles.timeoutTopRow}>
+                <Text style={styles.timeoutLabel}>TIME OUT</Text>
+                <Text style={styles.timeoutCountdown}>{timeoutSecsLeft}s</Text>
+              </View>
+              <View style={styles.timeoutBtnRow}>
+                <Pressable
+                  style={({ pressed }) => [styles.timeoutDismissBtn, { flex: 1 }, pressed && styles.pressed]}
+                  onPress={endTimeout}
+                >
+                  <Text style={styles.timeoutDismissText}>TIMEOUT FINISHED</Text>
+                </Pressable>
+                <Pressable
+                  style={({ pressed }) => [styles.timeoutCancelBtn, pressed && styles.pressed]}
+                  onPress={cancelTimeout}
+                >
+                  <Text style={styles.timeoutCancelText}>Cancel</Text>
+                </Pressable>
+              </View>
+            </View>
           ) : (
             <Animated.View style={{ opacity: timeoutFlash, width: '100%', alignItems: 'center' }}>
               <Pressable
@@ -679,6 +809,16 @@ export default function IndividualMatchScoringScreen() {
               <Text style={styles.actBtnText}>Game Over</Text>
               <Ionicons name="chevron-forward" size={18} color="#fff" />
             </Pressable>
+
+            {lastSnapshot && (
+              <Pressable
+                style={({ pressed }) => [styles.undoBtn, pressed && styles.pressed]}
+                onPress={() => { resetInactivity(); undoLastAction(); }}
+              >
+                <Ionicons name="arrow-undo" size={18} color={theme.colors.textSecondary} />
+                <Text style={styles.undoBtnText}>Back to {lastSnapshot.shooterName}'s turn</Text>
+              </Pressable>
+            )}
           </View>
         )}
 
@@ -686,7 +826,7 @@ export default function IndividualMatchScoringScreen() {
         {actionPhase === 'foul_options' && (
           <View style={styles.subPanel}>
             <Text style={styles.subPanelTitle}>Select Foul Type</Text>
-            {FOUL_OPTIONS.map(foul => (
+            {foulOptions.map(foul => (
               <Pressable
                 key={foul}
                 style={({ pressed }) => [styles.subOptionBtn, styles.subOptNeutral, pressed && styles.pressed]}
@@ -766,6 +906,16 @@ export default function IndividualMatchScoringScreen() {
             <Text style={styles.verifyHint}>
               Innings must match on both devices before continuing.
             </Text>
+
+            {lastSnapshot && (
+              <Pressable
+                style={({ pressed }) => [styles.undoBtn, { width: '100%' }, pressed && styles.pressed]}
+                onPress={() => { resetInactivity(); undoLastAction(); }}
+              >
+                <Ionicons name="arrow-undo" size={18} color={theme.colors.textSecondary} />
+                <Text style={styles.undoBtnText}>Undo Game Over</Text>
+              </Pressable>
+            )}
 
             {/* Confirm button — in a two-device setup, both devices will enter the same
                 count before proceeding. For now this single-device path confirms directly. */}
@@ -951,10 +1101,8 @@ const styles = StyleSheet.create({
 
   // ── Timeout banner ──
   timeoutBanner: {
-    flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 20,
     backgroundColor: '#0D1B2A',
     paddingVertical: 14,
     paddingHorizontal: 20,
@@ -978,11 +1126,41 @@ const styles = StyleSheet.create({
     minWidth: 64,
     textAlign: 'center',
   },
+  timeoutActiveInner: {
+    width: '100%',
+    gap: 12,
+    alignItems: 'center',
+  },
+  timeoutTopRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 20,
+  },
+  timeoutBtnRow: {
+    flexDirection: 'row',
+    gap: 10,
+    width: '100%',
+  },
   timeoutDismissBtn: {
     paddingHorizontal: 28,
     paddingVertical: 14,
     borderRadius: 10,
     backgroundColor: '#CC2222',
+    alignItems: 'center',
+  },
+  timeoutCancelBtn: {
+    paddingHorizontal: 18,
+    paddingVertical: 14,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#3A4A5A',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  timeoutCancelText: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: '#8899AA',
   },
   timeoutDismissText: {
     fontSize: 16,
@@ -1233,6 +1411,24 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: '700',
     color: '#FFFFFF',
+  },
+
+  // Undo button
+  undoBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    paddingVertical: 14,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: theme.colors.border,
+    backgroundColor: theme.colors.surface,
+  },
+  undoBtnText: {
+    fontSize: 15,
+    fontWeight: '600',
+    color: theme.colors.textSecondary,
   },
 
   // Misc

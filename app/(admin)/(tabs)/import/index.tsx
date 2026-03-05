@@ -1,11 +1,9 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useRef } from 'react';
 import {
   ActivityIndicator,
   Alert,
   FlatList,
-  Modal,
   Pressable,
-  ScrollView,
   StyleSheet,
   Text,
   View,
@@ -14,6 +12,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { router, useFocusEffect } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import * as DocumentPicker from 'expo-document-picker';
+import { Swipeable } from 'react-native-gesture-handler';
 import { theme } from '../../../../src/constants/theme';
 import { supabase } from '../../../../src/lib/supabase';
 import { SUPABASE_URL, SUPABASE_ANON_KEY } from '../../../../src/constants/config';
@@ -35,17 +34,21 @@ interface ImportRecord {
   error_count: number;
 }
 
-interface LeagueOption {
-  id: string;
-  name: string;
-  season: string;
-  year: number;
-  game_format: string;
-}
-
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
+
+function formatFilename(raw: string): string {
+  return raw
+    .replace(/^Scoresheet\s*/i, '')
+    .replace(/\.pdf$/i, '')
+    .replace(/([a-zA-Z])(\d)/g, '$1 $2')
+    .replace(/(\d)([a-zA-Z])/g, '$1 $2')
+    .replace(/([a-z])([A-Z])/g, '$1 $2')
+    .replace(/([a-zA-Z\d])\s*vs\s*/gi, '$1 vs ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
 
 const STATUS_COLORS: Record<ImportStatus, string> = {
   processing: '#FF9800',
@@ -65,104 +68,62 @@ const STATUS_LABELS: Record<ImportStatus, string> = {
 // Sub-components
 // ---------------------------------------------------------------------------
 
-function ImportItem({ item }: { item: ImportRecord }) {
+function ImportItem({ item, onDelete }: { item: ImportRecord; onDelete: () => void }) {
   const uploadDate = new Date(item.uploaded_at);
-  return (
-    <Pressable
-      style={({ pressed }) => [styles.importItem, pressed && styles.itemPressed]}
-      onPress={() => router.push(`/(admin)/(tabs)/import/${item.id}`)}
-    >
-      <View style={styles.importHeader}>
-        <View style={styles.fileInfo}>
-          <Ionicons name="document-outline" size={20} color={theme.colors.textSecondary} />
-          <Text style={styles.filename} numberOfLines={1}>{item.filename}</Text>
-        </View>
-        <View style={[styles.statusBadge, { backgroundColor: STATUS_COLORS[item.status] + '20' }]}>
-          <Text style={[styles.statusText, { color: STATUS_COLORS[item.status] }]}>
-            {STATUS_LABELS[item.status]}
-          </Text>
-        </View>
-      </View>
 
-      <View style={styles.importStats}>
-        <View style={styles.stat}>
-          <Text style={styles.statValue}>{item.total_rows}</Text>
-          <Text style={styles.statLabel}>Total</Text>
-        </View>
-        <View style={styles.stat}>
-          <Text style={[styles.statValue, { color: '#4CAF50' }]}>{item.success_count}</Text>
-          <Text style={styles.statLabel}>Success</Text>
-        </View>
-        <View style={styles.stat}>
-          <Text style={[styles.statValue, { color: item.error_count > 0 ? '#F44336' : theme.colors.textSecondary }]}>
-            {item.error_count}
-          </Text>
-          <Text style={styles.statLabel}>Errors</Text>
-        </View>
-      </View>
-
-      <Text style={styles.uploadDate}>
-        Uploaded{' '}
-        {uploadDate.toLocaleDateString('en-US', {
-          month: 'short', day: 'numeric', year: 'numeric',
-          hour: 'numeric', minute: '2-digit',
-        })}
-      </Text>
+  const renderRightActions = () => (
+    <Pressable style={styles.deleteAction} onPress={onDelete}>
+      <Ionicons name="trash-outline" size={22} color="#fff" />
+      <Text style={styles.deleteActionText}>Delete</Text>
     </Pressable>
   );
-}
-
-interface LeaguePickerProps {
-  leagues: LeagueOption[];
-  selected: LeagueOption | null;
-  onSelect: (league: LeagueOption) => void;
-}
-
-function LeaguePicker({ leagues, selected, onSelect }: LeaguePickerProps) {
-  const [open, setOpen] = useState(false);
 
   return (
-    <>
+    <Swipeable renderRightActions={renderRightActions} overshootRight={false}>
       <Pressable
-        style={({ pressed }) => [styles.leaguePicker, pressed && styles.itemPressed]}
-        onPress={() => setOpen(true)}
+        style={({ pressed }) => [styles.importItem, pressed && styles.itemPressed]}
+        onPress={() => router.push(`/(admin)/(tabs)/import/${item.id}`)}
       >
-        <Ionicons name="trophy-outline" size={20} color={theme.colors.primary} />
-        <Text style={[styles.leaguePickerText, !selected && styles.leaguePickerPlaceholder]} numberOfLines={1}>
-          {selected ? `${selected.name} — ${selected.season} ${selected.year}` : 'Select a league…'}
-        </Text>
-        <Ionicons name="chevron-down" size={18} color={theme.colors.textSecondary} />
-      </Pressable>
-
-      <Modal visible={open} transparent animationType="fade" onRequestClose={() => setOpen(false)}>
-        <Pressable style={styles.modalOverlay} onPress={() => setOpen(false)}>
-          <View style={styles.modalSheet}>
-            <Text style={styles.modalTitle}>Select League</Text>
-            <ScrollView showsVerticalScrollIndicator={false}>
-              {leagues.map((league) => (
-                <Pressable
-                  key={league.id}
-                  style={({ pressed }) => [
-                    styles.leagueOption,
-                    pressed && styles.itemPressed,
-                    selected?.id === league.id && styles.leagueOptionSelected,
-                  ]}
-                  onPress={() => { onSelect(league); setOpen(false); }}
-                >
-                  <Text style={styles.leagueOptionName}>{league.name}</Text>
-                  <Text style={styles.leagueOptionMeta}>
-                    {league.game_format === 'eight_ball' ? '8-Ball' : '9-Ball'} · {league.season} {league.year}
-                  </Text>
-                  {selected?.id === league.id && (
-                    <Ionicons name="checkmark" size={20} color={theme.colors.primary} style={styles.checkmark} />
-                  )}
-                </Pressable>
-              ))}
-            </ScrollView>
+        <View style={styles.importHeader}>
+          <View style={styles.fileInfo}>
+            <Ionicons name="document-outline" size={20} color={theme.colors.textSecondary} />
+            <Text style={styles.filename} numberOfLines={2}>
+              {formatFilename(item.filename)}
+            </Text>
           </View>
-        </Pressable>
-      </Modal>
-    </>
+          <View style={[styles.statusBadge, { backgroundColor: STATUS_COLORS[item.status] + '20' }]}>
+            <Text style={[styles.statusText, { color: STATUS_COLORS[item.status] }]}>
+              {STATUS_LABELS[item.status]}
+            </Text>
+          </View>
+        </View>
+
+        <View style={styles.importStats}>
+          <View style={styles.stat}>
+            <Text style={styles.statValue}>{item.total_rows}</Text>
+            <Text style={styles.statLabel}>Total</Text>
+          </View>
+          <View style={styles.stat}>
+            <Text style={[styles.statValue, { color: '#4CAF50' }]}>{item.success_count}</Text>
+            <Text style={styles.statLabel}>Success</Text>
+          </View>
+          <View style={styles.stat}>
+            <Text style={[styles.statValue, { color: item.error_count > 0 ? '#F44336' : theme.colors.textSecondary }]}>
+              {item.error_count}
+            </Text>
+            <Text style={styles.statLabel}>Errors</Text>
+          </View>
+        </View>
+
+        <Text style={styles.uploadDate}>
+          Uploaded{' '}
+          {uploadDate.toLocaleDateString('en-US', {
+            month: 'short', day: 'numeric', year: 'numeric',
+            hour: 'numeric', minute: '2-digit',
+          })}
+        </Text>
+      </Pressable>
+    </Swipeable>
   );
 }
 
@@ -172,49 +133,25 @@ function LeaguePicker({ leagues, selected, onSelect }: LeaguePickerProps) {
 
 export default function AdminImportIndex() {
   const { user } = useAuthContext();
-  const [leagues, setLeagues] = useState<LeagueOption[]>([]);
-  const [selectedLeague, setSelectedLeague] = useState<LeagueOption | null>(null);
   const [imports, setImports] = useState<ImportRecord[]>([]);
+  const [stagedCount, setStagedCount] = useState(0);
   const [isUploading, setIsUploading] = useState(false);
   const [uploadStep, setUploadStep] = useState('');
+  const [uploadProgress, setUploadProgress] = useState<{ current: number; total: number } | null>(null);
+  const cancelledRef = useRef(false);
+  const abortControllerRef = useRef<AbortController | null>(null);
 
   // ------------------------------------------------------------------
   // Data fetching
   // ------------------------------------------------------------------
 
-  const fetchLeagues = useCallback(async () => {
-    const { data, error } = await supabase
-      .from('leagues')
-      .select('id, name, season, year, game_format')
-      .eq('is_active', true)
-      .order('year', { ascending: false })
-      .order('name');
-
-    if (error) {
-      console.error('Failed to fetch leagues:', error.message);
-      return;
-    }
-
-    const mapped: LeagueOption[] = (data ?? []).map((l: any) => ({
-      id: l.id,
-      name: l.name,
-      season: l.season,
-      year: l.year,
-      game_format: l.game_format,
-    }));
-
-    setLeagues(mapped);
-    if (mapped.length === 1 && !selectedLeague) {
-      setSelectedLeague(mapped[0]);
-    }
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
-
   const fetchImports = useCallback(async () => {
+    const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
     const { data, error } = await supabase
       .from('imports')
       .select('*')
-      .order('created_at', { ascending: false })
-      .limit(50);
+      .gte('created_at', since)
+      .order('created_at', { ascending: false });
 
     if (error) {
       console.error('Failed to fetch imports:', error.message);
@@ -234,28 +171,145 @@ export default function AdminImportIndex() {
     setImports(mapped);
   }, []);
 
+  const fetchStagedCount = useCallback(async () => {
+    const { count } = await supabase
+      .from('team_matches')
+      .select('id', { count: 'exact', head: true })
+      .eq('status', 'imported');
+    setStagedCount(count ?? 0);
+  }, []);
+
   useFocusEffect(
     useCallback(() => {
-      fetchLeagues();
       fetchImports();
-    }, [fetchLeagues, fetchImports]),
+      fetchStagedCount();
+    }, [fetchImports, fetchStagedCount]),
   );
+
+  const handleDeleteImport = (item: ImportRecord) => {
+    Alert.alert(
+      'Delete Import',
+      `Delete "${formatFilename(item.filename)}"?\n\nThe import record will be removed. Any matches already promoted to Scheduled will not be affected.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: async () => {
+            // Remove any unscheduled matches created by this import
+            await supabase
+              .from('team_matches')
+              .delete()
+              .eq('import_id', item.id)
+              .eq('status', 'imported');
+
+            const { error } = await supabase
+              .from('imports')
+              .delete()
+              .eq('id', item.id);
+
+            if (error) {
+              Alert.alert('Error', 'Failed to delete import record.');
+              return;
+            }
+
+            // Best-effort storage cleanup
+            await supabase.storage
+              .from('imports')
+              .remove([`${item.id}/${item.filename}`]);
+
+            fetchImports();
+            fetchStagedCount();
+          },
+        },
+      ],
+    );
+  };
 
   // ------------------------------------------------------------------
   // Upload flow
   // ------------------------------------------------------------------
 
-  const handleSelectDocument = async () => {
-    if (!selectedLeague) {
-      Alert.alert('Select a League', 'Please select a league before uploading.');
-      return;
+  const handleCancel = () => {
+    cancelledRef.current = true;
+    abortControllerRef.current?.abort();
+    setIsUploading(false);
+    setUploadStep('');
+    setUploadProgress(null);
+    fetchImports(); // refresh so any partial record shows its real status
+  };
+
+  const uploadSingleFile = async (
+    file: DocumentPicker.DocumentPickerAsset,
+    session: { access_token: string },
+  ): Promise<{ processedRows: number; errorRows: number }> => {
+    // Step 1: Create the import record
+    setUploadStep('Creating import record…');
+    const { data: importRecord, error: importError } = await supabase
+      .from('imports')
+      .insert({
+        uploaded_by: user!.id,
+        file_name:   file.name,
+        file_type:   'pdf',
+        status:      'pending',
+      })
+      .select('id')
+      .single();
+
+    if (cancelledRef.current) return { processedRows: 0, errorRows: 0 };
+    if (importError || !importRecord) {
+      throw new Error(importError?.message ?? 'Failed to create import record');
     }
 
+    const importId = importRecord.id;
+
+    // Step 2: Upload PDF to Supabase Storage
+    setUploadStep('Uploading file…');
+    const storagePath = `${importId}/${file.name}`;
+
+    abortControllerRef.current = new AbortController();
+    const formData = new FormData();
+    formData.append('', { uri: file.uri, name: file.name, type: 'application/pdf' } as any);
+
+    const uploadRes = await fetch(
+      `${SUPABASE_URL}/storage/v1/object/imports/${storagePath}`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${session.access_token}`,
+          apikey: SUPABASE_ANON_KEY,
+        },
+        body: formData,
+        signal: abortControllerRef.current.signal,
+      },
+    );
+
+    if (cancelledRef.current) return { processedRows: 0, errorRows: 0 };
+    if (!uploadRes.ok) {
+      const errText = await uploadRes.text();
+      throw new Error(`Storage upload failed: ${errText}`);
+    }
+
+    // Step 3: Call the parse-pdf Edge Function
+    setUploadStep('Parsing PDF…');
+    const { data: fnResult, error: fnError } = await supabase.functions.invoke('parse-pdf', {
+      body: { importId, storagePath },
+    });
+
+    if (cancelledRef.current) return { processedRows: 0, errorRows: 0 };
+    if (fnError) throw new Error(`Parse failed: ${fnError.message}`);
+    if (!fnResult?.success) throw new Error(fnResult?.error ?? 'Parse returned no results');
+
+    return { processedRows: fnResult.processedRows, errorRows: fnResult.errorRows };
+  };
+
+  const handleSelectDocument = async () => {
     let result;
     try {
       result = await DocumentPicker.getDocumentAsync({
         type: 'application/pdf',
         copyToCacheDirectory: true,
+        multiple: true,
       });
     } catch {
       Alert.alert('Error', 'Failed to open file picker.');
@@ -264,84 +318,89 @@ export default function AdminImportIndex() {
 
     if (result.canceled || !result.assets?.length) return;
 
-    const file = result.assets[0];
-
+    const files = result.assets;
+    cancelledRef.current = false;
     setIsUploading(true);
+
+    let totalPlayers = 0;
+    let totalErrors = 0;
+    let matchesImported = 0;
+    let previouslyImported = 0;
+    const failedFiles: string[] = [];
+
     try {
-      // Step 1: Create the import record
-      setUploadStep('Creating import record…');
-      const { data: importRecord, error: importError } = await supabase
-        .from('imports')
-        .insert({
-          uploaded_by: user!.id,
-          file_name:   file.name,
-          file_type:   'pdf',
-          status:      'pending',
-        })
-        .select('id')
-        .single();
-
-      if (importError || !importRecord) {
-        throw new Error(importError?.message ?? 'Failed to create import record');
-      }
-
-      const importId = importRecord.id;
-
-      // Step 2: Upload PDF to Supabase Storage
-      setUploadStep('Uploading file…');
-      const storagePath = `${importId}/${file.name}`;
-
       const { data: { session } } = await supabase.auth.getSession();
       if (!session) throw new Error('Not authenticated');
 
-      const formData = new FormData();
-      formData.append('', { uri: file.uri, name: file.name, type: 'application/pdf' } as any);
+      // Check which filenames have already been imported
+      const { data: existingImports } = await supabase
+        .from('imports')
+        .select('file_name')
+        .in('file_name', files.map(f => f.name));
+      const alreadyImported = new Set((existingImports ?? []).map((i: any) => i.file_name));
 
-      const uploadRes = await fetch(
-        `${SUPABASE_URL}/storage/v1/object/imports/${storagePath}`,
-        {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${session.access_token}`,
-            apikey: SUPABASE_ANON_KEY,
-          },
-          body: formData,
-        },
-      );
+      for (let i = 0; i < files.length; i++) {
+        if (cancelledRef.current) break;
 
-      if (!uploadRes.ok) {
-        const errText = await uploadRes.text();
-        throw new Error(`Storage upload failed: ${errText}`);
+        const file = files[i];
+        setUploadProgress({ current: i + 1, total: files.length });
+
+        if (alreadyImported.has(file.name)) {
+          previouslyImported++;
+          continue;
+        }
+
+        try {
+          const { processedRows, errorRows } = await uploadSingleFile(file, session);
+          if (!cancelledRef.current) {
+            totalPlayers += processedRows;
+            totalErrors += errorRows;
+            matchesImported++;
+          }
+        } catch (err: unknown) {
+          if (cancelledRef.current) break;
+          failedFiles.push(file.name);
+          console.error(`Failed to import ${file.name}:`, err);
+        }
       }
 
-      // Step 3: Call the parse-pdf Edge Function
-      setUploadStep('Parsing PDF…');
-      const { data: fnResult, error: fnError } = await supabase.functions.invoke('parse-pdf', {
-        body: { importId, storagePath, leagueId: selectedLeague.id },
-      });
+      if (cancelledRef.current) return;
 
-      if (fnError) {
-        throw new Error(`Parse failed: ${fnError.message}`);
-      }
-
-      if (!fnResult?.success) {
-        throw new Error(fnResult?.error ?? 'Parse returned no results');
-      }
-
-      const { totalRows, processedRows, errorRows } = fnResult;
-      const msg =
-        errorRows > 0
-          ? `Imported ${processedRows} of ${totalRows} rows. ${errorRows} row(s) had errors.`
-          : `Successfully imported ${processedRows} player row(s).`;
-
-      Alert.alert('Import Complete', msg);
       fetchImports();
+      fetchStagedCount();
+
+      const lines: string[] = [];
+      if (matchesImported > 0) {
+        lines.push(`${matchesImported} match${matchesImported !== 1 ? 'es' : ''} imported (${totalPlayers} player${totalPlayers !== 1 ? 's' : ''} total).`);
+      }
+      if (previouslyImported > 0) {
+        lines.push(`${previouslyImported} match${previouslyImported !== 1 ? 'es' : ''} previously imported — skipped.`);
+      }
+      if (totalErrors > 0) {
+        lines.push(`${totalErrors} row(s) had errors.`);
+      }
+      if (failedFiles.length > 0) {
+        lines.push(`${failedFiles.length} file(s) failed:\n${failedFiles.map(f => `• ${formatFilename(f)}`).join('\n')}`);
+      }
+      if (matchesImported > 0) lines.push('Matches are awaiting scheduling.');
+
+      Alert.alert(
+        matchesImported > 0 ? 'Import Complete' : 'Import Failed',
+        lines.join('\n'),
+        matchesImported > 0
+          ? [{ text: 'Go to Staging', onPress: () => router.push('/(admin)/(tabs)/import/staging') }]
+          : [{ text: 'Return to Import', style: 'cancel' }]
+      );
     } catch (err: unknown) {
+      if (cancelledRef.current) return;
       const message = err instanceof Error ? err.message : String(err);
       Alert.alert('Import Failed', message);
     } finally {
-      setIsUploading(false);
-      setUploadStep('');
+      if (!cancelledRef.current) {
+        setIsUploading(false);
+        setUploadStep('');
+        setUploadProgress(null);
+      }
     }
   };
 
@@ -355,70 +414,57 @@ export default function AdminImportIndex() {
         <Text style={styles.headerTitle}>Import</Text>
       </View>
 
-      {/* League selector */}
+      {/* Upload button */}
       <View style={styles.section}>
-        <Text style={styles.sectionLabel}>League</Text>
-        {leagues.length === 0 ? (
-          <Pressable
-            style={styles.noLeagueRow}
-            onPress={() => router.push('/(admin)/(tabs)/leagues/create')}
-          >
-            <Ionicons name="alert-circle-outline" size={18} color="#FF9800" />
-            <Text style={styles.noLeagueText}>No active leagues — tap to create one first</Text>
-          </Pressable>
+        {isUploading ? (
+          <View style={[styles.uploadButton, styles.uploadButtonDisabled]}>
+            <ActivityIndicator color={theme.colors.primary} />
+            {uploadProgress && uploadProgress.total > 1 && (
+              <Text style={styles.uploadProgressText}>
+                File {uploadProgress.current} of {uploadProgress.total}
+              </Text>
+            )}
+            <Text style={styles.uploadingText}>{uploadStep}</Text>
+            <Pressable
+              style={({ pressed }) => [styles.cancelButton, pressed && styles.cancelButtonPressed]}
+              onPress={handleCancel}
+            >
+              <Text style={styles.cancelButtonText}>Cancel</Text>
+            </Pressable>
+          </View>
         ) : (
-          <LeaguePicker
-            leagues={leagues}
-            selected={selectedLeague}
-            onSelect={setSelectedLeague}
-          />
+          <Pressable
+            style={({ pressed }) => [styles.uploadButton, pressed && styles.buttonPressed]}
+            onPress={handleSelectDocument}
+          >
+            <Ionicons name="cloud-upload-outline" size={40} color={theme.colors.primary} />
+            <Text style={styles.uploadTitle}>Upload PDFs</Text>
+            <Text style={styles.uploadSubtitle}>Tap to select one or more APA scoresheet PDFs</Text>
+          </Pressable>
         )}
       </View>
 
-      {/* Upload button */}
-      <View style={styles.section}>
+      {/* Staged matches banner */}
+      {stagedCount > 0 && (
         <Pressable
-          style={({ pressed }) => [
-            styles.uploadButton,
-            pressed && !isUploading && styles.buttonPressed,
-            isUploading && styles.uploadButtonDisabled,
-            !selectedLeague && styles.uploadButtonDimmed,
-          ]}
-          onPress={handleSelectDocument}
-          disabled={isUploading}
+          style={({ pressed }) => [styles.stagedBanner, pressed && styles.itemPressed]}
+          onPress={() => router.push('/(admin)/(tabs)/import/staging')}
         >
-          {isUploading ? (
-            <View style={styles.uploadingContent}>
-              <ActivityIndicator color={theme.colors.primary} />
-              <Text style={styles.uploadingText}>{uploadStep}</Text>
-            </View>
-          ) : (
-            <>
-              <Ionicons
-                name="cloud-upload-outline"
-                size={40}
-                color={selectedLeague ? theme.colors.primary : theme.colors.textSecondary}
-              />
-              <Text style={[styles.uploadTitle, !selectedLeague && styles.dimmedText]}>
-                Upload PDF
-              </Text>
-              <Text style={styles.uploadSubtitle}>
-                {selectedLeague
-                  ? 'Tap to select an "Apa match data" PDF'
-                  : 'Select a league above first'}
-              </Text>
-            </>
-          )}
+          <Ionicons name="time-outline" size={20} color="#FF9800" />
+          <Text style={styles.stagedBannerText}>
+            {stagedCount} match{stagedCount !== 1 ? 'es' : ''} awaiting scheduling
+          </Text>
+          <Ionicons name="chevron-forward" size={18} color="#FF9800" />
         </Pressable>
-      </View>
+      )}
 
       {/* Recent imports */}
-      <Text style={styles.listHeader}>Recent Imports</Text>
+      <Text style={styles.listHeader}>Imports in Last 24 Hours</Text>
 
       <FlatList
         data={imports}
         keyExtractor={(item) => item.id}
-        renderItem={({ item }) => <ImportItem item={item} />}
+        renderItem={({ item }) => <ImportItem item={item} onDelete={() => handleDeleteImport(item)} />}
         contentContainerStyle={styles.listContent}
         showsVerticalScrollIndicator={false}
         ListEmptyComponent={
@@ -455,104 +501,6 @@ const styles = StyleSheet.create({
     paddingHorizontal: 20,
     paddingVertical: 12,
   },
-  sectionLabel: {
-    fontSize: 13,
-    fontWeight: '600',
-    color: theme.colors.textSecondary,
-    textTransform: 'uppercase',
-    letterSpacing: 0.8,
-    marginBottom: 8,
-  },
-
-  // League picker
-  leaguePicker: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: theme.colors.surface,
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: theme.colors.border,
-    paddingHorizontal: 16,
-    paddingVertical: 14,
-    gap: 10,
-    minHeight: 52,
-  },
-  leaguePickerText: {
-    flex: 1,
-    fontSize: 15,
-    fontWeight: '600',
-    color: theme.colors.text,
-  },
-  leaguePickerPlaceholder: {
-    color: theme.colors.textSecondary,
-    fontWeight: '400',
-  },
-  noLeagueRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    backgroundColor: '#FF980015',
-    borderRadius: 10,
-    padding: 14,
-    borderWidth: 1,
-    borderColor: '#FF980040',
-  },
-  noLeagueText: {
-    flex: 1,
-    fontSize: 14,
-    color: '#FF9800',
-    fontWeight: '500',
-  },
-
-  // Modal
-  modalOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.6)',
-    justifyContent: 'flex-end',
-  },
-  modalSheet: {
-    backgroundColor: theme.colors.surface,
-    borderTopLeftRadius: 20,
-    borderTopRightRadius: 20,
-    paddingTop: 20,
-    paddingBottom: 40,
-    paddingHorizontal: 20,
-    maxHeight: '70%',
-  },
-  modalTitle: {
-    fontSize: 18,
-    fontWeight: '700',
-    color: theme.colors.text,
-    marginBottom: 16,
-  },
-  leagueOption: {
-    paddingVertical: 14,
-    paddingHorizontal: 16,
-    borderRadius: 10,
-    marginBottom: 6,
-    borderWidth: 1,
-    borderColor: theme.colors.border,
-    backgroundColor: theme.colors.background,
-  },
-  leagueOptionSelected: {
-    borderColor: theme.colors.primary,
-    backgroundColor: theme.colors.primary + '15',
-  },
-  leagueOptionName: {
-    fontSize: 15,
-    fontWeight: '600',
-    color: theme.colors.text,
-    marginBottom: 2,
-  },
-  leagueOptionMeta: {
-    fontSize: 13,
-    color: theme.colors.textSecondary,
-  },
-  checkmark: {
-    position: 'absolute',
-    right: 14,
-    top: '50%',
-  },
 
   // Upload button
   uploadButton: {
@@ -575,16 +523,10 @@ const styles = StyleSheet.create({
   uploadButtonDisabled: {
     borderStyle: 'solid',
   },
-  uploadButtonDimmed: {
-    opacity: 0.6,
-  },
   uploadTitle: {
     fontSize: 17,
     fontWeight: '700',
     color: theme.colors.text,
-  },
-  dimmedText: {
-    color: theme.colors.textSecondary,
   },
   uploadSubtitle: {
     fontSize: 13,
@@ -596,10 +538,53 @@ const styles = StyleSheet.create({
     gap: 12,
     width: '100%',
   },
+  uploadProgressText: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: theme.colors.primary,
+  },
   uploadingText: {
     fontSize: 15,
     fontWeight: '600',
     color: theme.colors.text,
+  },
+  cancelButton: {
+    marginTop: 4,
+    paddingHorizontal: 24,
+    paddingVertical: 8,
+    borderRadius: 20,
+    borderWidth: 1,
+    borderColor: theme.colors.border,
+    backgroundColor: theme.colors.surface,
+  },
+  cancelButtonPressed: {
+    opacity: 0.7,
+  },
+  cancelButtonText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: theme.colors.textSecondary,
+  },
+
+  // Staged matches banner
+  stagedBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    backgroundColor: '#FF980015',
+    borderWidth: 1,
+    borderColor: '#FF980040',
+    borderRadius: 12,
+    marginHorizontal: 20,
+    marginBottom: 16,
+    paddingHorizontal: 16,
+    paddingVertical: 14,
+  },
+  stagedBannerText: {
+    flex: 1,
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#FF9800',
   },
 
   // Recent imports list
@@ -687,5 +672,19 @@ const styles = StyleSheet.create({
     fontSize: 18,
     fontWeight: '600',
     color: theme.colors.textSecondary,
+  },
+  deleteAction: {
+    backgroundColor: '#F44336',
+    borderRadius: 14,
+    marginLeft: 8,
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 20,
+    gap: 4,
+  },
+  deleteActionText: {
+    color: '#fff',
+    fontSize: 12,
+    fontWeight: '700',
   },
 });

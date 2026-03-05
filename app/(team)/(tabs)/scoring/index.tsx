@@ -180,8 +180,9 @@ export default function TeamScoringIndex() {
     if (result.firstMatch) {
       const putUpTeam =
         result.ourTeamPutsUpFirst === isHome ? 'home' : 'away';
+      // Go through catchup wizard first — handles "starting mid-match" case
       router.push(
-        `/(team)/(tabs)/scoring/${matchId}/putup?matchOrder=1&putUpTeam=${putUpTeam}`
+        `/(team)/(tabs)/scoring/${matchId}/catchup?putUpTeam=${putUpTeam}`
       );
     } else {
       router.push(`/(team)/(tabs)/scoring/${matchId}/resume`);

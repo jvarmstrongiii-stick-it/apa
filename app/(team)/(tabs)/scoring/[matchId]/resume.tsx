@@ -104,13 +104,19 @@ export default function ResumeScreen() {
     if (!matchId) return;
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
 
-    // Write resumed_at timestamp if the individual_match exists
-    if (match.id) {
-      await supabase
-        .from('individual_matches')
-        .update({ resumed_at: new Date().toISOString() })
-        .eq('id', match.id);
+    // If players aren't set yet, route to putup instead of scoring
+    if (!match.id || !match.home_player_name || !match.away_player_name) {
+      router.push(
+        `/(team)/(tabs)/scoring/${matchId}/putup?matchOrder=${match.match_order}&putUpTeam=home`
+      );
+      return;
     }
+
+    // Write resumed_at timestamp
+    await supabase
+      .from('individual_matches')
+      .update({ resumed_at: new Date().toISOString() })
+      .eq('id', match.id);
 
     // Navigate to the scoring screen for this individual match
     router.push(

@@ -5,17 +5,11 @@ import { theme } from '../../../src/constants/theme';
 
 type IoniconsName = keyof typeof Ionicons.glyphMap;
 
-interface TabIconProps {
-  name: IoniconsName;
-  color: string;
-  size: number;
-}
-
-function TabIcon({ name, color, size }: TabIconProps) {
+function TabIcon({ name, color, size }: { name: IoniconsName; color: string; size: number }) {
   return <Ionicons name={name} size={size} color={color} />;
 }
 
-export default function AdminTabsLayout() {
+export default function SuperuserTabsLayout() {
   const insets = useSafeAreaInsets();
   return (
     <Tabs
@@ -45,7 +39,7 @@ export default function AdminTabsLayout() {
         options={{
           title: 'Dashboard',
           tabBarIcon: ({ color, size }) => (
-            <TabIcon name="grid-outline" color={color} size={size} />
+            <TabIcon name="home-outline" color={color} size={size} />
           ),
         }}
       />
@@ -59,36 +53,14 @@ export default function AdminTabsLayout() {
         }}
       />
       <Tabs.Screen
-        name="matches"
+        name="accounts"
         options={{
-          title: 'Matches',
+          title: 'LO Accounts',
           tabBarIcon: ({ color, size }) => (
-            <TabIcon name="play-circle-outline" color={color} size={size} />
+            <TabIcon name="people-outline" color={color} size={size} />
           ),
         }}
       />
-      <Tabs.Screen
-        name="import"
-        options={{
-          title: 'Import',
-          tabBarIcon: ({ color, size }) => (
-            <TabIcon name="cloud-upload-outline" color={color} size={size} />
-          ),
-        }}
-      />
-      <Tabs.Screen
-        name="settings"
-        options={{
-          title: 'Settings',
-          tabBarIcon: ({ color, size }) => (
-            <TabIcon name="settings-outline" color={color} size={size} />
-          ),
-        }}
-      />
-      {/* Hidden routes — navigated from dashboard, not shown in tab bar */}
-      <Tabs.Screen name="divisions" options={{ href: null }} />
-      <Tabs.Screen name="divisions/[divisionId]" options={{ href: null }} />
-      <Tabs.Screen name="divisions/[divisionId]/team/[teamId]" options={{ href: null }} />
     </Tabs>
   );
 }

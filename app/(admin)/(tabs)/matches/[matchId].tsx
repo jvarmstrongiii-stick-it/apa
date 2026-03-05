@@ -74,6 +74,7 @@ export default function AdminMatchDetail() {
   const { matchId } = useLocalSearchParams<{ matchId: string }>();
   const [match, setMatch] = useState<MatchDetail | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+  const [matchNotStarted, setMatchNotStarted] = useState(false);
   const [showReopenModal, setShowReopenModal] = useState(false);
   const [reopenReason, setReopenReason] = useState('');
   const [isReopening, setIsReopening] = useState(false);
@@ -85,21 +86,29 @@ export default function AdminMatchDetail() {
   const fetchMatchDetail = async () => {
     setIsLoading(true);
     try {
-      const { data, error } = await supabase
-        .from('team_matches')
-        .select(`
-          *,
-          home_team:teams!home_team_id(name),
-          away_team:teams!away_team_id(name),
-          division:divisions!division_id(name, league:leagues!league_id(name)),
-          individual_matches(*, home_player:players!home_player_id(first_name, last_name, skill_level), away_player:players!away_player_id(first_name, last_name, skill_level)),
-          audit_log(*, profile:profiles!user_id(display_name)),
-          disputes(reason, status)
-        `)
-        .eq('id', matchId!)
-        .single();
+      const [matchResult, auditResult] = await Promise.all([
+        supabase
+          .from('team_matches')
+          .select(`
+            *,
+            home_team:teams!home_team_id(name),
+            away_team:teams!away_team_id(name),
+            division:divisions!division_id(name, league:leagues!league_id(name)),
+            individual_matches(*, home_player:players!home_player_id(first_name, last_name, skill_level), away_player:players!away_player_id(first_name, last_name, skill_level)),
+            disputes(reason, status)
+          `)
+          .eq('id', matchId!)
+          .single(),
+        supabase
+          .from('audit_log')
+          .select('*, profile:profiles!user_id(display_name)')
+          .eq('table_name', 'team_matches')
+          .eq('record_id', matchId!)
+          .order('created_at', { ascending: true }),
+      ]);
 
-      if (error) throw error;
+      if (matchResult.error) throw matchResult.error;
+      const data = matchResult.data;
 
       const individualMatches: IndividualMatch[] = (data.individual_matches ?? [])
         .sort((a: any, b: any) => a.match_order - b.match_order)
@@ -114,8 +123,7 @@ export default function AdminMatchDetail() {
           winner: im.winner_player_id === im.home_player_id ? 'home' as const : im.winner_player_id === im.away_player_id ? 'away' as const : null,
         }));
 
-      const auditLog: AuditEntry[] = (data.audit_log ?? [])
-        .sort((a: any, b: any) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime())
+      const auditLog: AuditEntry[] = (auditResult.data ?? [])
         .map((entry: any) => ({
           id: entry.id,
           action: entry.action,
@@ -142,8 +150,18 @@ export default function AdminMatchDetail() {
       };
 
       setMatch(matchDetail);
-    } catch (error) {
-      console.error('Failed to fetch match:', error);
+    } catch {
+      // Main fetch failed — check status without the heavy joins
+      const { data: statusRow } = await supabase
+        .from('team_matches')
+        .select('status')
+        .eq('id', matchId!)
+        .maybeSingle();
+
+      if (statusRow?.status === 'scheduled') {
+        setMatchNotStarted(true);
+      }
+      // If statusRow is null the match truly doesn't exist — show "Match not found"
     } finally {
       setIsLoading(false);
     }
@@ -187,7 +205,9 @@ export default function AdminMatchDetail() {
     return (
       <SafeAreaView style={styles.safeArea} edges={['top']}>
         <View style={styles.centeredContainer}>
-          <Text style={styles.errorText}>Match not found</Text>
+          <Text style={styles.errorText}>
+            {matchNotStarted ? 'Match not yet started' : 'Match not found'}
+          </Text>
           <Pressable style={styles.goBackButton} onPress={() => router.back()}>
             <Text style={styles.goBackText}>Go Back</Text>
           </Pressable>
