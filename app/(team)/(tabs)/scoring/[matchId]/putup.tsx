@@ -23,6 +23,7 @@ import {
   ActivityIndicator,
   FlatList,
   Pressable,
+  ScrollView,
   StyleSheet,
   Text,
   View,
@@ -31,6 +32,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { router, useLocalSearchParams } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
+import NetInfo from '@react-native-community/netinfo';
 import { theme } from '../../../../../src/constants/theme';
 import { supabase } from '../../../../../src/lib/supabase';
 import { useAuthContext } from '../../../../../src/providers/AuthProvider';
@@ -85,7 +87,13 @@ export default function PutUpScreen() {
   const [saving, setSaving] = useState(false);
   const [opponentConnected, setOpponentConnected] = useState(false);
 
+  // Offline fallback — shown when connectivity is absent or Realtime times out
+  const [offlineFallback, setOfflineFallback] = useState(false);
+  const [offlineHomeId, setOfflineHomeId] = useState<string | null>(null);
+  const [offlineAwayId, setOfflineAwayId] = useState<string | null>(null);
+
   const channelRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
+  const realtimeTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // ─── Dev bypass (triple-tap header title → auto-fill both players) ────────
   const [devTapCount, setDevTapCount] = useState(0);
@@ -255,6 +263,10 @@ export default function PutUpScreen() {
         await fetchOpponentPlayer(im as IndividualMatchRecord, side, oppTeamId);
       }
 
+      // Check connectivity — if offline, show fallback immediately
+      const net = await NetInfo.fetch();
+      if (!net.isConnected) setOfflineFallback(true);
+
       setLoading(false);
     };
 
@@ -285,7 +297,16 @@ export default function PutUpScreen() {
       .subscribe();
 
     channelRef.current = channel;
-    return () => { channel.unsubscribe(); };
+
+    // If Realtime hasn't connected within 10 seconds, offer the offline fallback
+    realtimeTimeoutRef.current = setTimeout(() => {
+      if (channel.state !== 'joined') setOfflineFallback(true);
+    }, 10_000);
+
+    return () => {
+      channel.unsubscribe();
+      if (realtimeTimeoutRef.current) clearTimeout(realtimeTimeoutRef.current);
+    };
   }, [indMatch?.id, ourSide, opponentTeamId, fetchOpponentPlayer]);
 
   // ─── Auto-navigate when both players are set ──────────────────────────────
@@ -322,6 +343,36 @@ export default function PutUpScreen() {
 
     if (updated) setIndMatch(updated as IndividualMatchRecord);
     setSaving(false);
+  };
+
+  // ─── Offline: proceed with manually selected players ──────────────────────
+  const proceedOffline = async () => {
+    if (!indMatch || !ourSide || saving) return;
+    const homeId = offlineHomeId ?? roster[0]?.id;
+    const awayId = offlineAwayId ?? roster[0]?.id;
+    if (!homeId || !awayId) return;
+
+    setSaving(true);
+    const homeSL = roster.find(p => p.id === homeId)?.skill_level ?? 3;
+    const awaySL = roster.find(p => p.id === awayId)?.skill_level ?? 3;
+
+    await supabase
+      .from('individual_matches')
+      .update({
+        home_player_id: homeId,
+        away_player_id: awayId,
+        home_skill_level: homeSL,
+        away_skill_level: awaySL,
+      })
+      .eq('id', indMatch.id);
+
+    await supabase
+      .from('team_matches')
+      .update({ status: 'in_progress' })
+      .eq('id', matchId);
+
+    setSaving(false);
+    router.replace(`/(team)/(tabs)/scoring/${matchId}/${matchOrder - 1}`);
   };
 
   // ─── Determine current UI phase ───────────────────────────────────────────
@@ -376,6 +427,69 @@ export default function PutUpScreen() {
 
   // ─── Render phase content ─────────────────────────────────────────────────
   const renderContent = () => {
+    // Offline fallback — let the scorekeeper manually set both players
+    if (offlineFallback && phase !== 'loading' && phase !== 'ready') {
+      return (
+        <ScrollView contentContainerStyle={styles.offlineContainer}>
+          <View style={styles.offlineBanner}>
+            <Ionicons name="warning-outline" size={24} color="#F59E0B" />
+            <Text style={styles.offlineBannerText}>
+              No network — WiFi required for two-device put-up coordination.
+              You can still proceed manually.
+            </Text>
+          </View>
+
+          <Text style={styles.rosterLabel}>Home player:</Text>
+          {roster.map(p => (
+            <Pressable
+              key={`home-${p.id}`}
+              style={[styles.rosterRow, offlineHomeId === p.id && styles.rosterRowSelected]}
+              onPress={() => setOfflineHomeId(p.id)}
+            >
+              <View style={styles.rosterInfo}>
+                <Text style={styles.rosterName}>{p.name}</Text>
+                <Text style={styles.rosterStats}>SL {p.skill_level} · {p.matches_played} MP</Text>
+              </View>
+              {offlineHomeId === p.id && (
+                <Ionicons name="checkmark-circle" size={22} color={theme.colors.primary} />
+              )}
+            </Pressable>
+          ))}
+
+          <Text style={[styles.rosterLabel, { marginTop: 20 }]}>Away player:</Text>
+          {roster.map(p => (
+            <Pressable
+              key={`away-${p.id}`}
+              style={[styles.rosterRow, offlineAwayId === p.id && styles.rosterRowSelected]}
+              onPress={() => setOfflineAwayId(p.id)}
+            >
+              <View style={styles.rosterInfo}>
+                <Text style={styles.rosterName}>{p.name}</Text>
+                <Text style={styles.rosterStats}>SL {p.skill_level} · {p.matches_played} MP</Text>
+              </View>
+              {offlineAwayId === p.id && (
+                <Ionicons name="checkmark-circle" size={22} color={theme.colors.primary} />
+              )}
+            </Pressable>
+          ))}
+
+          <Pressable
+            style={[
+              styles.offlineProceedButton,
+              (!offlineHomeId || !offlineAwayId || saving) && styles.offlineProceedDisabled,
+            ]}
+            onPress={proceedOffline}
+            disabled={!offlineHomeId || !offlineAwayId || saving}
+          >
+            <Text style={styles.offlineProceedText}>
+              {saving ? 'Starting…' : 'Start Match'}
+            </Text>
+            <Ionicons name="arrow-forward" size={20} color="#FFFFFF" />
+          </Pressable>
+        </ScrollView>
+      );
+    }
+
     switch (phase) {
       case 'loading':
         return (
@@ -670,5 +784,51 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     color: theme.colors.success,
     textAlign: 'center',
+  },
+  // Offline fallback
+  offlineContainer: {
+    padding: 20,
+    paddingBottom: 40,
+    gap: 8,
+  },
+  offlineBanner: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 10,
+    backgroundColor: '#F59E0B15',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#F59E0B40',
+    padding: 14,
+    marginBottom: 12,
+  },
+  offlineBannerText: {
+    flex: 1,
+    fontSize: 14,
+    color: '#F59E0B',
+    lineHeight: 20,
+  },
+  rosterRowSelected: {
+    borderColor: theme.colors.primary,
+    backgroundColor: theme.colors.primary + '15',
+  },
+  offlineProceedButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    backgroundColor: theme.colors.primary,
+    borderRadius: 12,
+    paddingVertical: 16,
+    marginTop: 24,
+    minHeight: 52,
+  },
+  offlineProceedDisabled: {
+    opacity: 0.4,
+  },
+  offlineProceedText: {
+    fontSize: 17,
+    fontWeight: '700',
+    color: '#FFFFFF',
   },
 });

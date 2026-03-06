@@ -14,6 +14,7 @@ import { theme } from '../../../../src/constants/theme';
 import { supabase } from '../../../../src/lib/supabase';
 import { useAuthContext } from '../../../../src/providers/AuthProvider';
 import { CoinFlipModal } from '../../../../src/components/CoinFlipModal';
+import { flushPendingWrites, getPendingMatchIds } from '../../../../src/lib/pendingWrites';
 
 type ScorableStatus = 'scheduled' | 'lineup_set' | 'in_progress';
 
@@ -26,6 +27,7 @@ interface ScorableMatch {
   location: string;
   game_format: '8-ball' | '9-ball';
   current_individual_match: number | null; // null if not started
+  individual_match_ids: string[]; // UUIDs of individual_matches rows (for pending-write badge)
 }
 
 const STATUS_COLORS: Record<ScorableStatus, string> = {
@@ -48,10 +50,12 @@ const ACTION_LABELS: Record<ScorableStatus, string> = {
 
 function ScorableMatchItem({
   match,
+  hasPending,
   onScheduledPress,
   onResetPress,
 }: {
   match: ScorableMatch;
+  hasPending: boolean;
   onScheduledPress: (matchId: string, isHome: boolean) => void;
   onResetPress: (matchId: string) => void;
 }) {
@@ -85,15 +89,23 @@ function ScorableMatchItem({
         <View style={styles.formatBadge}>
           <Text style={styles.formatText}>{match.game_format}</Text>
         </View>
-        <View
-          style={[
-            styles.statusBadge,
-            { backgroundColor: STATUS_COLORS[match.status] + '20' },
-          ]}
-        >
-          <Text style={[styles.statusText, { color: STATUS_COLORS[match.status] }]}>
-            {STATUS_LABELS[match.status]}
-          </Text>
+        <View style={styles.headerRight}>
+          {hasPending && (
+            <View style={styles.pendingBadge}>
+              <Ionicons name="cloud-upload-outline" size={12} color="#F59E0B" />
+              <Text style={styles.pendingBadgeText}>Sync pending</Text>
+            </View>
+          )}
+          <View
+            style={[
+              styles.statusBadge,
+              { backgroundColor: STATUS_COLORS[match.status] + '20' },
+            ]}
+          >
+            <Text style={[styles.statusText, { color: STATUS_COLORS[match.status] }]}>
+              {STATUS_LABELS[match.status]}
+            </Text>
+          </View>
         </View>
       </View>
 
@@ -169,6 +181,7 @@ export default function TeamScoringIndex() {
   const teamId = profile?.team_id;
   const [matches, setMatches] = useState<ScorableMatch[]>([]);
   const [refreshing, setRefreshing] = useState(false);
+  const [pendingMatchIds, setPendingMatchIds] = useState<Set<string>>(new Set());
   const [coinFlipVisible, setCoinFlipVisible] = useState(false);
   const pendingMatchId = useRef<string | null>(null);
   const pendingIsHome = useRef<boolean>(true);
@@ -252,6 +265,7 @@ export default function TeamScoringIndex() {
         location: m.division?.location ?? '',
         game_format: gameFormat as '8-ball' | '9-ball',
         current_individual_match: currentMatch,
+        individual_match_ids: individualMatches.map((im: any) => im.id),
       };
     });
     setMatches(mapped);
@@ -259,6 +273,10 @@ export default function TeamScoringIndex() {
 
   useFocusEffect(
     useCallback(() => {
+      // Flush any queued offline writes, then refresh the list and pending badge state
+      flushPendingWrites().finally(() => {
+        setPendingMatchIds(getPendingMatchIds());
+      });
       fetchScorableMatches();
     }, [fetchScorableMatches])
   );
@@ -283,7 +301,12 @@ export default function TeamScoringIndex() {
         data={matches}
         keyExtractor={(item) => item.id}
         renderItem={({ item }) => (
-          <ScorableMatchItem match={item} onScheduledPress={handleScheduledPress} onResetPress={handleResetMatch} />
+          <ScorableMatchItem
+            match={item}
+            hasPending={item.individual_match_ids.some(id => pendingMatchIds.has(id))}
+            onScheduledPress={handleScheduledPress}
+            onResetPress={handleResetMatch}
+          />
         )}
         contentContainerStyle={styles.listContent}
         showsVerticalScrollIndicator={false}
@@ -351,6 +374,25 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     color: theme.colors.primary,
     textTransform: 'uppercase',
+  },
+  headerRight: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  pendingBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    backgroundColor: '#F59E0B20',
+    borderRadius: 6,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+  },
+  pendingBadgeText: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: '#F59E0B',
   },
   statusBadge: {
     borderRadius: 8,

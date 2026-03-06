@@ -319,14 +319,175 @@ function buildPlaceholderMemberNumber(teamNumber: string, fullName: string): str
 }
 
 // ---------------------------------------------------------------------------
+// Parser 3 — APA 9-ball official scoresheet PDF
+//
+// Key differences from the 8-ball sheet:
+//   • "For Week Number: 9/15 On 03/04/2026" (not "For Week #:")
+//     "9/15" = week 9 of 15; we extract the first number as weekNumber.
+//   • Team number comes FIRST: "Team:44204Richie's Bill MU1" (no space between # and name)
+//   • "LP\d" suffix on team name = "Late Pay week N" — strip from name.
+//   • Two-column visual layout (home left / visiting right).
+//     pdfjs reads this row-by-row, so "SL MP Player# Name" headers appear TWICE
+//     (concatenated: "SLMPPlayer #NameSLMPPlayer #Name"), and player rows are
+//     interleaved: [home 7-digit block][home name][visit 7-digit block][visit name]...
+//   • 4-page PDF: pages 1 & 3 are blank, pages 2 & 4 are data.
+// ---------------------------------------------------------------------------
+
+/**
+ * Parse 9-ball interleaved player rows.
+ * pdfjs reads the two-column table row-by-row, so each row emits:
+ *   [home_SL 1][home_MP 1][home_member# 5]  home_name
+ *   [visit_SL 1][visit_MP 1][visit_member# 5]  visit_name
+ * repeating for every player pair.
+ */
+// Validates "Last, First" APA name format.
+// Rejects: empty strings, bare commas, names with digits/colons (standings/scoring text).
+const VALID_PLAYER_NAME_RE = /^[A-Z][A-Za-z'\- ]+,\s*[A-Z]/;
+
+function parseInterleavedPlayers(section: string): { homePlayers: PlayerData[]; awayPlayers: PlayerData[] } {
+  const clean = section.replace(/N(?=\d)/g, '');
+  const homePlayers: PlayerData[] = [];
+  const awayPlayers: PlayerData[] = [];
+  let pos = 0;
+
+  while (pos < clean.length) {
+    // Advance to next digit
+    while (pos < clean.length && !/\d/.test(clean[pos])) pos++;
+    if (pos >= clean.length) break;
+
+    // Expect exactly 7 consecutive digits — home player block
+    if (pos + 7 > clean.length) break;
+    const homeBlock = clean.slice(pos, pos + 7);
+    if (!/^\d{7}$/.test(homeBlock)) { pos++; continue; }
+    pos += 7;
+
+    const homeSL     = parseInt(homeBlock[0], 10);
+    const homeMP     = parseInt(homeBlock[1], 10);
+    const homeMember = homeBlock.slice(2);
+
+    // Home player name: everything until the next 7-digit block
+    const homeNameStart = pos;
+    while (pos < clean.length && !/^\d{7}/.test(clean.slice(pos))) pos++;
+    const homeName = clean.slice(homeNameStart, pos).replace(/\d+$/, '').trim();
+
+    // Expect exactly 7 consecutive digits — visiting player block
+    if (pos + 7 > clean.length) break;
+    const visitBlock = clean.slice(pos, pos + 7);
+    if (!/^\d{7}$/.test(visitBlock)) { pos++; continue; }
+    pos += 7;
+
+    const visitSL     = parseInt(visitBlock[0], 10);
+    const visitMP     = parseInt(visitBlock[1], 10);
+    const visitMember = visitBlock.slice(2);
+
+    // Visiting player name: everything until the next 7-digit block or end
+    const visitNameStart = pos;
+    while (pos < clean.length && !/^\d{7}/.test(clean.slice(pos))) pos++;
+    const visitName = clean.slice(visitNameStart, pos).replace(/\d+$/, '').trim();
+
+    if (homeSL >= 1 && homeSL <= 9 && VALID_PLAYER_NAME_RE.test(homeName)) {
+      homePlayers.push({ fullName: homeName, memberNumber: homeMember, skillLevel: homeSL, matchesPlayed: isNaN(homeMP) ? 0 : homeMP });
+    }
+    if (visitSL >= 1 && visitSL <= 9 && VALID_PLAYER_NAME_RE.test(visitName)) {
+      awayPlayers.push({ fullName: visitName, memberNumber: visitMember, skillLevel: visitSL, matchesPlayed: isNaN(visitMP) ? 0 : visitMP });
+    }
+  }
+
+  return { homePlayers, awayPlayers };
+}
+
+function parseAPANineBallScoresheet(text: string): MatchImportData {
+  // 1. Week + date
+  const weekDateM = text.match(
+    /For\s*Week\s*(?:Number|#):\s*(\d+)\s*\/\s*\d+\s*On\s*(\d{2}\/\d{2}\/\d{4})/
+  );
+  if (!weekDateM) {
+    throw new Error(
+      '9-ball parse failed: could not find week/date (expected "For Week Number:N/NN OnMM/DD/YYYY"). Snippet: ' +
+        text.slice(0, 300)
+    );
+  }
+  const weekNumber = parseInt(weekDateM[1], 10);
+  const matchDate  = convertDate(weekDateM[2]);
+
+  // 2. Division (ends at "Division Rep" or "Division Standings")
+  const divM = text.match(/Division:\s*(.+?)(?=Division\s+(?:Rep|Standings))/i);
+  const divisionName = divM ? divM[1].trim() : 'Unknown';
+
+  // 3. Team lines: "Team:NNNNN Name" (number-first, may have no space between # and name).
+  //    The page header "Scoresheet for Team:Name..." has name-first (no leading digits)
+  //    so it won't match Team:\s*(\d{5}).
+  //    First match = home team, second match = visiting team.
+  const stripLatePay = (s: string) => s.replace(/\s*LP\d+\s*$/, '').trim();
+  const teamRe = /Team:\s*(\d{5})\s*(.+?)(?=Team:\s*\d{5}|Host\s*Location:|SL\s*\*?\s*MP)/gis;
+  const teamMatches = [...text.matchAll(teamRe)];
+  if (teamMatches.length < 2) {
+    throw new Error(
+      '9-ball parse failed: expected 2 team lines (Team:NNNNN Name), found ' +
+        teamMatches.length + '. Snippet: ' + text.slice(0, 500)
+    );
+  }
+  const homeTeam = { number: teamMatches[0][1], name: stripLatePay(teamMatches[0][2]) };
+  const awayTeam = { number: teamMatches[1][1], name: stripLatePay(teamMatches[1][2]) };
+  const divisionNumber = homeTeam.number.slice(0, 3);
+
+  // 4. Find the player data section.
+  //    Both "SL MP Player # Name" headers appear concatenated (one per column).
+  //    Slice everything after the SECOND header — that's the interleaved player data.
+  const headerRe = /SL\s*\*?\s*MP\s*Player\s*#?\s*Name/gi;
+  const headers = [...text.matchAll(headerRe)];
+  if (headers.length < 2) {
+    throw new Error(
+      '9-ball parse failed: expected 2 player table headers (one per column), found ' +
+        headers.length + '. Snippet: ' + text.slice(0, 500)
+    );
+  }
+  // The APA annotation legend begins with "N" (literally a double-quoted N):
+  //   "N" Before Skill Level = Not Paid
+  //   "$" After Players Name = Membership Amount Due
+  //   "*" Before Skill Level = Incomplete Information On File
+  // This appears after the last player name and must not be parsed as player data.
+  // Double quotes never appear in legitimate player names or member numbers.
+  const rawPlayerSection = text.slice((headers[1].index ?? 0) + headers[1][0].length);
+  const legendStart = rawPlayerSection.indexOf('"');
+  const playerSection = legendStart >= 0 ? rawPlayerSection.slice(0, legendStart) : rawPlayerSection;
+
+  // 5. Parse interleaved rows
+  const { homePlayers, awayPlayers } = parseInterleavedPlayers(playerSection);
+
+  if (!homePlayers.length) {
+    throw new Error('9-ball parse failed: no home players found. Section: ' + playerSection.slice(0, 200));
+  }
+  if (!awayPlayers.length) {
+    throw new Error('9-ball parse failed: no away players found. Section: ' + playerSection.slice(0, 200));
+  }
+
+  return {
+    divisionName,
+    divisionNumber,
+    gameFormat: 'nine_ball',
+    weekNumber,
+    matchDate,
+    homeTeam,
+    awayTeam,
+    homePlayers,
+    awayPlayers,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Auto-detect format and parse
 // ---------------------------------------------------------------------------
 
 function detectAndParse(text: string): MatchImportData {
-  // APA official scoresheet: pdfjs extracts "For Week #:" near the top
+  // APA official 8-ball scoresheet
   if (text.includes('For Week #:') && text.includes('Team:Home Team')) {
-    // parseAPAScoresheet now throws with a specific message on any failure.
     return parseAPAScoresheet(text);
+  }
+
+  // APA official 9-ball scoresheet ("For Week Number:" instead of "For Week #:")
+  if (text.includes('For Week Number:')) {
+    return parseAPANineBallScoresheet(text);
   }
 
   const result = parseAdminUploadFormat(text);

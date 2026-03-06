@@ -7,7 +7,7 @@
  *   1. Lag for break (first rack) or winner-breaks (subsequent racks)
  *   2. Turn buttons: Turn Over / Defensive Shot / Time Out / Foul / Game Over
  *   3. Innings auto-increment when non-breaker ends their turn
- *   4. Innings verification (two-device agreement) before next rack
+ *   4. Innings verification before next rack
  *   5. Match ends when a player reaches their race-to target
  *
  * Innings rule: inning completes when the non-breaker ends their turn.
@@ -15,6 +15,7 @@
  */
 
 import { useState, useEffect, useRef, useCallback } from 'react';
+import * as SecureStore from 'expo-secure-store';
 import {
   Alert,
   Animated,
@@ -29,6 +30,9 @@ import { router, useLocalSearchParams } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { theme } from '../../../../../../src/constants/theme';
 import { supabase } from '../../../../../../src/lib/supabase';
+import NetInfo from '@react-native-community/netinfo';
+import { enqueuePendingWrite } from '../../../../../../src/lib/pendingWrites';
+import { useAuthContext } from '../../../../../../src/providers/AuthProvider';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -114,6 +118,15 @@ const GAME_OVER_NORMAL_8: GameOverOption[] = [
   { label: 'Made 8 Ball, Pocket Not Marked',  winner: 'opponent', special: null },
 ];
 
+/** Breaker's turn after the break shot — Break and Run is still possible, but not "Made 8 on Break" */
+const GAME_OVER_BREAKER_RUN: GameOverOption[] = [
+  { label: 'Break and Run',                   winner: 'current',  special: 'break_and_run' },
+  { label: 'Made 8 Ball',                     winner: 'current',  special: null },
+  { label: 'Scratched on 8 Ball',             winner: 'opponent', special: null },
+  { label: '8 Ball in Wrong Pocket',          winner: 'opponent', special: null },
+  { label: 'Made 8 Ball, Pocket Not Marked',  winner: 'opponent', special: null },
+];
+
 const GAME_OVER_NORMAL_9: GameOverOption[] = [
   { label: 'Made 9 Ball',        winner: 'current',  special: null },
   { label: 'Scratched on 9 Ball', winner: 'opponent', special: null },
@@ -129,10 +142,14 @@ export default function IndividualMatchScoringScreen() {
     individualMatchIndex: string;
   }>();
   const matchIndex = parseInt(individualMatchIndex ?? '0');
+  const { profile } = useAuthContext();
+  const teamId = profile?.team_id;
 
   // ── Data loading ────────────────────────────────────────────────────────────
   const [loading, setLoading] = useState(true);
   const [gameFormat, setGameFormat] = useState<GameFormat>('8-ball');
+  const [scorekeeperCount, setScorekeeperCount] = useState<1 | 2>(1);
+  const [ourSide, setOurSide] = useState<Side | null>(null);
   const [individualMatchId, setIndividualMatchId] = useState<string | null>(null);
   const [homePlayer, setHomePlayer] = useState<PlayerInfo>({
     name: 'Home Player', skill_level: 3, race_to: 2,
@@ -161,9 +178,8 @@ export default function IndividualMatchScoringScreen() {
   const [timeoutsHome, setTimeoutsHome] = useState(2);
   const [timeoutsAway, setTimeoutsAway] = useState(2);
 
-  // ── Innings verification (two-device agreement before next rack) ─────────────
-  //  After a rack ends both scorekeepers enter their inning count independently.
-  //  If they match → proceed. If not → use +/- to reconcile.
+  // ── Innings verification ──────────────────────────────────────────────────────
+  //  After a rack ends the scorer reviews the inning count and adjusts if needed.
   const [verifyMyInnings, setVerifyMyInnings] = useState<number>(0);  // this device's entry
   const [verifyTheirInnings, setVerifyTheirInnings] = useState<number | null>(null); // DB value
   const [pendingRackWinner, setPendingRackWinner] = useState<Side | null>(null);
@@ -185,6 +201,11 @@ export default function IndividualMatchScoringScreen() {
   const [inactivityVisible, setInactivityVisible] = useState(false);
   const inactivityTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // ── State persistence ─────────────────────────────────────────────────────────
+  // Set to true after the initial load (including any SecureStore restore) completes.
+  // Prevents the save effect from writing before we've had a chance to restore.
+  const hasLoaded = useRef(false);
+
   // ─── Derived state ───────────────────────────────────────────────────────────
 
   const currentShooter: Side | null =
@@ -205,9 +226,11 @@ export default function IndividualMatchScoringScreen() {
   const gameOverOptions: GameOverOption[] =
     isBreakTurn
       ? GAME_OVER_BREAK
-      : gameFormat === '8-ball'
-        ? GAME_OVER_NORMAL_8
-        : GAME_OVER_NORMAL_9;
+      : currentShooterIsBreaker && gameFormat === '8-ball'
+        ? GAME_OVER_BREAKER_RUN
+        : gameFormat === '8-ball'
+          ? GAME_OVER_NORMAL_8
+          : GAME_OVER_NORMAL_9;
 
   // "Scratch on Break" only applies on the breaker's first shot of the rack.
   const foulOptions = isBreakTurn
@@ -219,16 +242,39 @@ export default function IndividualMatchScoringScreen() {
   useEffect(() => {
     const load = async () => {
       if (!matchId) return;
+
+      const cacheKey = `match-data-${matchId}-${matchIndex}`;
+
+      // Helper: apply fetched/cached player data to state
+      function applyMatchData(cached: {
+        individualMatchId: string;
+        gameFormat: GameFormat;
+        scorekeeperCount: 1 | 2;
+        homeName: string; homeSL: number; homeRaceTo: number;
+        awayName: string; awaySL: number; awayRaceTo: number;
+      }) {
+        setIndividualMatchId(cached.individualMatchId);
+        setGameFormat(cached.gameFormat);
+        setScorekeeperCount(cached.scorekeeperCount);
+        setHomePlayer({ name: cached.homeName, skill_level: cached.homeSL, race_to: cached.homeRaceTo });
+        setAwayPlayer({ name: cached.awayName, skill_level: cached.awaySL, race_to: cached.awayRaceTo });
+        setTimeoutsHome(timeoutsForSL(cached.homeSL));
+        setTimeoutsAway(timeoutsForSL(cached.awaySL));
+      }
+
       try {
         const { data: tm } = await supabase
           .from('team_matches')
-          .select('division:divisions!division_id(league:leagues!league_id(game_format))')
+          .select('home_team_id, away_team_id, division:divisions!division_id(league:leagues!league_id(game_format, scorekeeper_count))')
           .eq('id', matchId)
           .single();
 
-        const fmt: GameFormat =
-          (tm?.division as any)?.league?.game_format === 'nine_ball' ? '9-ball' : '8-ball';
-        setGameFormat(fmt);
+        const league = (tm?.division as any)?.league;
+        const fmt: GameFormat = league?.game_format === 'nine_ball' ? '9-ball' : '8-ball';
+        const skCount = (league?.scorekeeper_count ?? 1) as 1 | 2;
+        if (teamId) {
+          setOurSide((tm as any)?.home_team_id === teamId ? 'home' : 'away');
+        }
 
         const { data: ims } = await supabase
           .from('individual_matches')
@@ -243,28 +289,94 @@ export default function IndividualMatchScoringScreen() {
 
         if (ims && ims.length > 0) {
           const im = ims[0] as any;
-          setIndividualMatchId(im.id);
           const hsl: number = im.home_player?.skill_level ?? 3;
           const asl: number = im.away_player?.skill_level ?? 3;
           const [rh, ra] = getRace(hsl, asl);
-          setHomePlayer({
-            name:
-              `${im.home_player?.first_name ?? ''} ${im.home_player?.last_name ?? ''}`.trim() ||
-              'Home Player',
-            skill_level: hsl,
-            race_to: rh,
-          });
-          setAwayPlayer({
-            name:
-              `${im.away_player?.first_name ?? ''} ${im.away_player?.last_name ?? ''}`.trim() ||
-              'Away Player',
-            skill_level: asl,
-            race_to: ra,
-          });
-          setTimeoutsHome(timeoutsForSL(hsl));
-          setTimeoutsAway(timeoutsForSL(asl));
+          const homeName =
+            `${im.home_player?.first_name ?? ''} ${im.home_player?.last_name ?? ''}`.trim() || 'Home Player';
+          const awayName =
+            `${im.away_player?.first_name ?? ''} ${im.away_player?.last_name ?? ''}`.trim() || 'Away Player';
+
+          const matchDataCache = {
+            individualMatchId: im.id,
+            gameFormat: fmt,
+            scorekeeperCount: skCount,
+            homeName, homeSL: hsl, homeRaceTo: rh,
+            awayName, awaySL: asl, awayRaceTo: ra,
+          };
+
+          // Cache for offline use
+          SecureStore.setItemAsync(cacheKey, JSON.stringify(matchDataCache));
+
+          applyMatchData(matchDataCache);
+
+          // Restore mid-match state if the scorer left and came back
+          const savedRaw = await SecureStore.getItemAsync(`scoring-state-${im.id}`);
+          if (savedRaw) {
+            try {
+              const s = JSON.parse(savedRaw);
+              setRacksWonHome(s.racksWonHome ?? 0);
+              setRacksWonAway(s.racksWonAway ?? 0);
+              setTotalInnings(s.totalInnings ?? 0);
+              setDefShotsHome(s.defShotsHome ?? 0);
+              setDefShotsAway(s.defShotsAway ?? 0);
+              setBreakAndRunHome(s.breakAndRunHome ?? false);
+              setBreakAndRunAway(s.breakAndRunAway ?? false);
+              setEightOnBreakHome(s.eightOnBreakHome ?? false);
+              setEightOnBreakAway(s.eightOnBreakAway ?? false);
+              setRackNumber(s.rackNumber ?? 1);
+              setBreakPlayer(s.breakPlayer ?? null);
+              setIsBreakTurn(s.isBreakTurn ?? true);
+              setCurrentShooterIsBreaker(s.currentShooterIsBreaker ?? true);
+              setRackInnings(s.rackInnings ?? 0);
+              setTimeoutsHome(s.timeoutsHome ?? timeoutsForSL(hsl));
+              setTimeoutsAway(s.timeoutsAway ?? timeoutsForSL(asl));
+              setActionPhase(s.actionPhase ?? 'turn');
+              setPendingRackWinner(s.pendingRackWinner ?? null);
+              setVerifyMyInnings(s.verifyMyInnings ?? 0);
+            } catch {
+              // Ignore corrupted snapshot — start fresh
+            }
+          }
+        }
+      } catch {
+        // DB fetch failed (offline) — try the local cache
+        const cachedRaw = await SecureStore.getItemAsync(cacheKey);
+        if (cachedRaw) {
+          try {
+            const cached = JSON.parse(cachedRaw);
+            applyMatchData(cached);
+
+            // Restore mid-match state using cached individualMatchId
+            const savedRaw = await SecureStore.getItemAsync(`scoring-state-${cached.individualMatchId}`);
+            if (savedRaw) {
+              const s = JSON.parse(savedRaw);
+              setRacksWonHome(s.racksWonHome ?? 0);
+              setRacksWonAway(s.racksWonAway ?? 0);
+              setTotalInnings(s.totalInnings ?? 0);
+              setDefShotsHome(s.defShotsHome ?? 0);
+              setDefShotsAway(s.defShotsAway ?? 0);
+              setBreakAndRunHome(s.breakAndRunHome ?? false);
+              setBreakAndRunAway(s.breakAndRunAway ?? false);
+              setEightOnBreakHome(s.eightOnBreakHome ?? false);
+              setEightOnBreakAway(s.eightOnBreakAway ?? false);
+              setRackNumber(s.rackNumber ?? 1);
+              setBreakPlayer(s.breakPlayer ?? null);
+              setIsBreakTurn(s.isBreakTurn ?? true);
+              setCurrentShooterIsBreaker(s.currentShooterIsBreaker ?? true);
+              setRackInnings(s.rackInnings ?? 0);
+              setTimeoutsHome(s.timeoutsHome ?? timeoutsForSL(cached.homeSL));
+              setTimeoutsAway(s.timeoutsAway ?? timeoutsForSL(cached.awaySL));
+              setActionPhase(s.actionPhase ?? 'turn');
+              setPendingRackWinner(s.pendingRackWinner ?? null);
+              setVerifyMyInnings(s.verifyMyInnings ?? 0);
+            }
+          } catch {
+            // Cache corrupt — show empty screen
+          }
         }
       } finally {
+        hasLoaded.current = true;
         setLoading(false);
       }
     };
@@ -288,6 +400,38 @@ export default function IndividualMatchScoringScreen() {
       if (inactivityTimer.current) clearTimeout(inactivityTimer.current);
     };
   }, [breakPlayer, resetInactivity]);
+
+  // ─── Persist scoring state to SecureStore after every action ─────────────────
+
+  useEffect(() => {
+    if (!hasLoaded.current || !individualMatchId) return;
+    const snapshot = {
+      racksWonHome, racksWonAway, totalInnings,
+      defShotsHome, defShotsAway,
+      breakAndRunHome, breakAndRunAway,
+      eightOnBreakHome, eightOnBreakAway,
+      rackNumber, breakPlayer,
+      isBreakTurn, currentShooterIsBreaker,
+      rackInnings, timeoutsHome, timeoutsAway,
+      actionPhase, pendingRackWinner,
+      verifyMyInnings,
+    };
+    SecureStore.setItemAsync(
+      `scoring-state-${individualMatchId}`,
+      JSON.stringify(snapshot)
+    );
+  }, [
+    individualMatchId,
+    racksWonHome, racksWonAway, totalInnings,
+    defShotsHome, defShotsAway,
+    breakAndRunHome, breakAndRunAway,
+    eightOnBreakHome, eightOnBreakAway,
+    rackNumber, breakPlayer,
+    isBreakTurn, currentShooterIsBreaker,
+    rackInnings, timeoutsHome, timeoutsAway,
+    actionPhase, pendingRackWinner,
+    verifyMyInnings,
+  ]);
 
   // ─── Timeout countdown ───────────────────────────────────────────────────────
 
@@ -488,11 +632,13 @@ export default function IndividualMatchScoringScreen() {
   function confirmInnings(finalInnings: number) {
     const rackWinner = pendingRackWinner!;
 
-    // Reconcile: update running totals if innings changed from live count
+    // Reconcile: calculate corrected total synchronously so saveAndNavigate gets the right value.
+    // setTotalInnings is async; using the closure value directly avoids stale state on the last rack.
     const diff = finalInnings - rackInnings;
+    const correctedTotal = totalInnings + diff;
     if (diff !== 0) {
       setRackInnings(finalInnings);
-      setTotalInnings(t => t + diff);
+      setTotalInnings(correctedTotal);
     }
 
     const newHome = rackWinner === 'home' ? racksWonHome + 1 : racksWonHome;
@@ -502,7 +648,7 @@ export default function IndividualMatchScoringScreen() {
     setPendingRackWinner(null);
 
     if (newHome >= homePlayer.race_to || newAway >= awayPlayer.race_to) {
-      saveAndNavigate(newHome, newAway);
+      saveAndNavigate(newHome, newAway, correctedTotal);
     } else {
       // Winner breaks next rack
       setRackNumber(n => n + 1);
@@ -512,25 +658,55 @@ export default function IndividualMatchScoringScreen() {
 
   // ─── Save & navigate ─────────────────────────────────────────────────────────
 
-  async function saveAndNavigate(finalHome: number, finalAway: number) {
-    if (individualMatchId) {
-      try {
-        await supabase
-          .from('individual_matches')
-          .update({
-            home_points_earned: finalHome,
-            away_points_earned: finalAway,
-            innings: totalInnings,
-          })
-          .eq('id', individualMatchId);
+  async function saveAndNavigate(finalHome: number, finalAway: number, inningsOverride?: number) {
+    const innings = inningsOverride ?? totalInnings;
 
-        await supabase
-          .from('team_matches')
-          .update({ status: 'in_progress' })
-          .eq('id', matchId!)
-          .in('status', ['lineup_set', 'scheduled']);
-      } catch (e) {
-        console.error('Save error:', e);
+    if (individualMatchId) {
+      const net = await NetInfo.fetch();
+
+      if (!net.isConnected) {
+        // Offline — queue the write; SecureStore state will be cleared on flush
+        enqueuePendingWrite({
+          individualMatchId,
+          teamMatchId: matchId!,
+          home: finalHome,
+          away: finalAway,
+          innings,
+        });
+        // Keep SecureStore state intact — needed to reconstruct if user re-opens before sync
+      } else {
+        try {
+          const { error } = await supabase
+            .from('individual_matches')
+            .update({
+              home_points_earned: finalHome,
+              away_points_earned: finalAway,
+              innings,
+            })
+            .eq('id', individualMatchId);
+
+          if (error) throw error;
+
+          await supabase
+            .from('team_matches')
+            .update({ status: 'in_progress' })
+            .eq('id', matchId!)
+            .in('status', ['lineup_set', 'scheduled']);
+
+          // Clear persisted state — match is complete, don't restore stale data on re-open
+          SecureStore.deleteItemAsync(`scoring-state-${individualMatchId}`);
+          // Clear match data cache — no longer needed after successful write
+          SecureStore.deleteItemAsync(`match-data-${matchId}-${matchIndex}`);
+        } catch (e) {
+          console.error('Save error — queuing for later:', e);
+          enqueuePendingWrite({
+            individualMatchId,
+            teamMatchId: matchId!,
+            home: finalHome,
+            away: finalAway,
+            innings,
+          });
+        }
       }
     }
 
@@ -881,10 +1057,9 @@ export default function IndividualMatchScoringScreen() {
         {/* ── Innings verification ── */}
         {actionPhase === 'innings_verify' && (
           <View style={styles.verifyPanel}>
-            <Text style={styles.verifyTitle}>Verify Innings</Text>
+            <Text style={styles.verifyTitle}>Confirm Innings</Text>
             <Text style={styles.verifyBody}>
-              Confirm the inning count with the other scorekeeper before starting the next rack.
-              Adjust below if needed.
+              Check your tally and adjust below if needed.
             </Text>
 
             <View style={styles.verifyCounterRow}>
@@ -904,7 +1079,7 @@ export default function IndividualMatchScoringScreen() {
             </View>
 
             <Text style={styles.verifyHint}>
-              Innings must match on both devices before continuing.
+              Tap +/− to correct the count if the live tally missed an inning.
             </Text>
 
             {lastSnapshot && (
@@ -917,8 +1092,7 @@ export default function IndividualMatchScoringScreen() {
               </Pressable>
             )}
 
-            {/* Confirm button — in a two-device setup, both devices will enter the same
-                count before proceeding. For now this single-device path confirms directly. */}
+            {/* Confirm and advance to next rack */}
             <Pressable
               style={({ pressed }) => [styles.verifyConfirmBtn, pressed && styles.pressed]}
               onPress={() => confirmInnings(verifyMyInnings)}

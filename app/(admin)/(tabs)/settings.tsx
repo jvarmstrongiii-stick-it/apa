@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
   Alert,
   Pressable,
@@ -13,6 +13,7 @@ import { router } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { theme } from '../../../src/constants/theme';
 import { useAuthContext } from '../../../src/providers/AuthProvider';
+import { supabase } from '../../../src/lib/supabase/client';
 import Constants from 'expo-constants';
 
 const APP_VERSION = Constants.expoConfig?.version ?? '1.0.0';
@@ -27,6 +28,58 @@ const ENVIRONMENT = Constants.expoConfig?.extra?.eas?.projectId
 export default function AdminSettingsScreen() {
   const { signOut, user } = useAuthContext();
   const [biometricEnabled, setBiometricEnabled] = useState(false);
+  const [leagueId, setLeagueId] = useState<string | null>(null);
+  const [scorekeeperCount, setScorekeeperCount] = useState<1 | 2>(1);
+  const [savingScorekeeper, setSavingScorekeeper] = useState(false);
+
+  useEffect(() => {
+    if (!user) return;
+
+    async function loadLeagueSetting() {
+      // Fetch the LO's profile to get their associated league_id
+      // (league_id added in migration 00022 — not yet in generated types, cast needed)
+      const { data: profileData } = await supabase
+        .from('profiles')
+        .select('league_id')
+        .eq('id', user!.id)
+        .single() as any;
+
+      const lid: string | null = profileData?.league_id ?? null;
+      setLeagueId(lid);
+
+      if (!lid) return;
+
+      // Fetch scorekeeper_count from the league
+      // (column added in migration 00016 — not yet in generated types, cast needed)
+      const { data: leagueData } = await supabase
+        .from('leagues')
+        .select('scorekeeper_count')
+        .eq('id', lid)
+        .single() as any;
+
+      if (leagueData?.scorekeeper_count) {
+        setScorekeeperCount(leagueData.scorekeeper_count as 1 | 2);
+      }
+    }
+
+    loadLeagueSetting();
+  }, [user]);
+
+  const handleScorekeeperCount = async (count: 1 | 2) => {
+    if (!leagueId || savingScorekeeper || count === scorekeeperCount) return;
+    setSavingScorekeeper(true);
+    const prev = scorekeeperCount;
+    setScorekeeperCount(count);
+    const { error } = await (supabase
+      .from('leagues')
+      .update({ scorekeeper_count: count } as any)
+      .eq('id', leagueId) as any);
+    if (error) {
+      setScorekeeperCount(prev);
+      Alert.alert('Error', 'Failed to update scorekeeper setting.');
+    }
+    setSavingScorekeeper(false);
+  };
 
   const handleToggleBiometric = async (value: boolean) => {
     try {
@@ -116,6 +169,54 @@ export default function AdminSettingsScreen() {
             />
           </View>
         </View>
+
+        {/* Scoring Section — only shown when LO has an associated league */}
+        {leagueId != null && (
+          <>
+            <Text style={styles.sectionTitle}>Scoring</Text>
+            <View style={styles.section}>
+              <View style={[styles.settingRow, styles.settingRowLast]}>
+                <View style={styles.settingInfo}>
+                  <Ionicons name="people-outline" size={22} color={theme.colors.textSecondary} />
+                  <View>
+                    <Text style={styles.settingLabel}>Scorekeepers per Match</Text>
+                    <Text style={styles.settingDescription}>
+                      2 scorekeepers enables innings verification on both devices
+                    </Text>
+                  </View>
+                </View>
+                <View style={styles.segmentedControl}>
+                  <Pressable
+                    style={[
+                      styles.segmentButton,
+                      styles.segmentButtonLeft,
+                      scorekeeperCount === 1 && styles.segmentButtonActive,
+                    ]}
+                    onPress={() => handleScorekeeperCount(1)}
+                  >
+                    <Text style={[
+                      styles.segmentButtonText,
+                      scorekeeperCount === 1 && styles.segmentButtonTextActive,
+                    ]}>1</Text>
+                  </Pressable>
+                  <Pressable
+                    style={[
+                      styles.segmentButton,
+                      styles.segmentButtonRight,
+                      scorekeeperCount === 2 && styles.segmentButtonActive,
+                    ]}
+                    onPress={() => handleScorekeeperCount(2)}
+                  >
+                    <Text style={[
+                      styles.segmentButtonText,
+                      scorekeeperCount === 2 && styles.segmentButtonTextActive,
+                    ]}>2</Text>
+                  </Pressable>
+                </View>
+              </View>
+            </View>
+          </>
+        )}
 
         {/* App Info Section */}
         <Text style={styles.sectionTitle}>About</Text>
@@ -234,6 +335,34 @@ const styles = StyleSheet.create({
     fontSize: 15,
     color: theme.colors.textSecondary,
     fontWeight: '500',
+  },
+  segmentedControl: {
+    flexDirection: 'row',
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: theme.colors.border,
+    overflow: 'hidden',
+  },
+  segmentButton: {
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    backgroundColor: theme.colors.background,
+  },
+  segmentButtonLeft: {
+    borderRightWidth: 1,
+    borderRightColor: theme.colors.border,
+  },
+  segmentButtonRight: {},
+  segmentButtonActive: {
+    backgroundColor: theme.colors.primary,
+  },
+  segmentButtonText: {
+    fontSize: 15,
+    fontWeight: '600',
+    color: theme.colors.textSecondary,
+  },
+  segmentButtonTextActive: {
+    color: '#FFFFFF',
   },
   signOutButton: {
     flexDirection: 'row',

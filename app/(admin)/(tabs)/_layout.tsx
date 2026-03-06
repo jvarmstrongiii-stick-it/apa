@@ -88,7 +88,6 @@ export default function AdminTabsLayout() {
       {/* Hidden routes — navigated from dashboard, not shown in tab bar */}
       <Tabs.Screen name="divisions" options={{ href: null }} />
       <Tabs.Screen name="divisions/[divisionId]" options={{ href: null }} />
-      <Tabs.Screen name="divisions/[divisionId]/team/[teamId]" options={{ href: null }} />
     </Tabs>
   );
 }
