@@ -29,3 +29,9 @@ export const STALE_LOCK_THRESHOLD_MS = 300000;
  * Standard APA 8-Ball rule: 5 players, max total skill level of 23.
  */
 export const MAX_TEAM_SKILL_LEVEL = 23;
+
+/**
+ * Anthropic API key for the in-app APA Rules Assistant.
+ * Set EXPO_PUBLIC_ANTHROPIC_KEY in your .env file.
+ */
+export const ANTHROPIC_API_KEY = process.env.EXPO_PUBLIC_ANTHROPIC_KEY ?? '';

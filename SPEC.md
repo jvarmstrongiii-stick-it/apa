@@ -1,5 +1,5 @@
 # Pool League Scoring App — Working Specification
-**Living Document | Updated 2026-03-05**
+**Living Document | Updated 2026-03-09**
 
 ---
 
@@ -38,6 +38,8 @@ Three user roles: **Team** (scorekeepers, anonymous auth), **LO** (League Operat
 | Haptics | `expo-haptics` |
 | Secure Storage | `expo-secure-store` |
 | Icons | `@expo/vector-icons` (Ionicons) |
+| AI Rules Assistant | Anthropic API (`claude-opus-4-6`), key via `EXPO_PUBLIC_ANTHROPIC_KEY` |
+| Voice Input | `expo-speech-recognition` (requires custom dev client; gracefully degrades in Expo Go) |
 
 **Supabase project ref:** `lyhlnaibdqznipllfmuu`
 
@@ -118,6 +120,7 @@ Three user roles: **Team** (scorekeepers, anonymous auth), **LO** (League Operat
 | year | integer | |
 | is_active | boolean | DEFAULT true |
 | created_by | uuid | FK → profiles |
+| scorekeeper_count | integer | 1 or 2 (DEFAULT 1); 2 = two-device innings verification |
 
 ### divisions
 | Column | Type | Notes |
@@ -214,6 +217,8 @@ Three user roles: **Team** (scorekeepers, anonymous auth), **LO** (League Operat
 | defensive_shots | integer | |
 | is_completed | boolean | DEFAULT false |
 | completed_at | timestamptz | |
+| innings_verify_home | integer | Primary scorer's submitted count (NULL when idle) |
+| innings_verify_away | integer | Secondary/follower scorer's submitted count (NULL when idle) |
 
 ### racks_eight_ball
 | Column | Type | Notes |
@@ -304,7 +309,7 @@ Legend: **✅ BUILT** | **🔶 PARTIAL** | **❌ NOT STARTED**
 | Auto-fill settings from league type | ❌ NOT STARTED | All settings currently hardcoded |
 | "Modified from defaults" indicator | ❌ NOT STARTED | |
 | Division management (add/remove) | ✅ BUILT | Within league detail screen |
-| League Settings page (configurable rules) | ❌ NOT STARTED | See §8 Gaps |
+| League Settings page (configurable rules) | 🔶 PARTIAL | `scorekeeper_count` (1 or 2) configurable via LO Settings page; other rule settings not started |
 
 ### Admin/LO — Match Management
 | Feature | Status | Notes |
@@ -345,6 +350,7 @@ Legend: **✅ BUILT** | **🔶 PARTIAL** | **❌ NOT STARTED**
 | Catchup: partial racks on starting match | ✅ BUILT | |
 | Catchup saves to DB (23-rule consistent) | ✅ BUILT | Upserts individual_matches |
 | Put-up screen (Realtime two-device) | ✅ BUILT | Supabase Realtime `postgres_changes` |
+| Put-up offline fallback | ✅ BUILT | 10s Realtime timeout → manual player picker from roster; writes both player IDs and sets match in_progress |
 | "Other team not started" message | ✅ BUILT | `opponentConnected` flag |
 | Dev bypass (triple-tap title, solo testing) | ✅ BUILT | Hidden; auto-fills two different players; sets skill levels on individual_match |
 | Stale put-up self-heal | ✅ BUILT | If team_match.status='scheduled' and individual_match already has both players, clears them on load |
@@ -364,13 +370,16 @@ Legend: **✅ BUILT** | **🔶 PARTIAL** | **❌ NOT STARTED**
 | Foul types (4 options) | ✅ BUILT | Scratch on Break, Scratched, Hit Wrong Ball First, Legal Contact — No Rail Hit |
 | Game Over options (break vs. normal) | ✅ BUILT | 8-ball: Made 8 on Break, B&R, Fouled 8; Normal: Made 8, Scratch on 8, Wrong Pocket, Not Marked |
 | Innings verification panel (after each rack) | ✅ BUILT | +/- adjust before confirm |
+| Two-device innings verification | ✅ BUILT | When `scorekeeper_count=2`: each device submits independently via DB columns; Realtime detects agreement or discrepancy; discrepancy UI lets one device reconcile |
+| Offline write queue | ✅ BUILT | `NetInfo` check before save; queued via `src/lib/pendingWrites.ts` (wraps MMKV sync queue); match data cached in SecureStore; flushed on scoring index focus |
+| Sync pending badge (scoring index) | ✅ BUILT | Amber "Sync pending" badge on match cards with queued writes |
+| Follower mode (second scorekeeper device) | ✅ BUILT | "Follow Match" button on in_progress + scorekeeper_count=2 matches; `?mode=follower` param; follower sees read-only scoreboard + waiting notice; enters innings count independently when primary scorer ends rack; Realtime syncs racks_home/away |
 | Undo / Back (one level deep, snapshot-based) | ✅ BUILT | "Back to [Player]'s turn" / "Undo Game Over" |
 | ON THE HILL indicator | ✅ BUILT | Yellow dot + text |
 | Rack dots scoreboard | ✅ BUILT | |
 | Defensive shot tracking | ✅ BUILT | |
 | Break & Run / 8 on Break flags | ✅ BUILT | |
 | Scorecard sessions (pessimistic locking) | ❌ NOT STARTED | Table exists; not wired into app |
-| Live viewer (read-only mode) | ❌ NOT STARTED | |
 | 9-ball scoring (ball-by-ball) | ❌ NOT STARTED | Format detected; rack tables exist; UI not built |
 
 ### Scorekeeping — Handoff
@@ -399,6 +408,17 @@ Legend: **✅ BUILT** | **🔶 PARTIAL** | **❌ NOT STARTED**
 | Disputes UI | ❌ NOT STARTED | Admin dashboard shows count placeholder |
 | Protest/dispute workflow | ❌ NOT STARTED | |
 
+### APA Rules Assistant
+| Feature | Status | Notes |
+|---|---|---|
+| Floating 🎱 FAB (all screens) | ✅ BUILT | `src/components/RulesAssistant.tsx`; absolute overlay, above tab bar |
+| Chat panel (slide-up modal) | ✅ BUILT | Chip shortcuts, message bubbles, "Show Me the Proof" citations |
+| Anthropic API integration | ✅ BUILT | `claude-opus-4-6`; key in `.env` as `EXPO_PUBLIC_ANTHROPIC_KEY` |
+| Quick question chips (wrapped rows) | ✅ BUILT | 6 preset questions visible without scrolling |
+| "Show Me the Proof" citations | ✅ BUILT | Secondary API call extracts rule number + quote |
+| Press-and-hold voice input | 🔶 PARTIAL | Logic built; requires custom dev client (`expo-speech-recognition`); degrades gracefully in Expo Go — big 🎱 mic button shown, hint switches to "Type your question below" |
+| FAB long-press mic entry | ✅ BUILT | Hold the floating 🎱 to start recording before panel opens |
+
 ---
 
 ## 6. Screen Inventory
@@ -413,6 +433,7 @@ Legend: **✅ BUILT** | **🔶 PARTIAL** | **❌ NOT STARTED**
 | Team Dashboard | `/(team)/(tabs)/` | ✅ BUILT | Next match, season summary, quick actions, logout |
 | Scoring Index | `/(team)/(tabs)/scoring` | ✅ BUILT | Scorable match list |
 | Coin Flip Modal | component | ✅ BUILT | Used by dashboard + scoring index |
+| APA Rules Assistant | component (global) | ✅ BUILT | Floating 🎱 FAB + slide-up chat panel; mounted in root layout |
 | Catchup Wizard | `/(team)/(tabs)/scoring/[matchId]/catchup` | ✅ BUILT | Retroactive data entry |
 | Put Up | `/(team)/(tabs)/scoring/[matchId]/putup` | ✅ BUILT | Realtime two-device |
 | Resume | `/(team)/(tabs)/scoring/[matchId]/resume` | ✅ BUILT | |
@@ -442,7 +463,7 @@ Legend: **✅ BUILT** | **🔶 PARTIAL** | **❌ NOT STARTED**
 | Team Detail | `/(admin)/(tabs)/divisions/[divisionId]/team/[teamId]` | ✅ BUILT | |
 | Player Management | — | ❌ NOT STARTED | Direct CRUD |
 | Team Management | — | ❌ NOT STARTED | Direct CRUD |
-| Admin Settings | `/(admin)/(tabs)/settings` | ✅ BUILT | Account, biometrics (TODO), sign out |
+| Admin/LO Settings | `/(admin)/(tabs)/settings` | ✅ BUILT | Account, sign out; Scoring section: scorekeeper count (1 or 2) segmented control |
 | **SUPERUSER** | | | |
 | Superuser Dashboard | `/(superuser)/(tabs)/` | ✅ BUILT | Switch User + Log Out buttons |
 | Superuser Leagues | `/(superuser)/(tabs)/leagues` | ✅ BUILT | League list/management |
@@ -552,6 +573,9 @@ The following are hardcoded and would need to move to `LeagueSettings` for multi
 ### Lineups Table Not Integrated
 The `lineups` table (with skill cap enforcement) exists in DB but is not used by the scoring flow. Players are selected via put-up screen (stored directly on `individual_matches`), bypassing lineup pre-confirmation.
 
+### Generated Types Stale
+`src/types/database.types.ts` (Supabase-generated) does not include `profiles.league_id`, `leagues.scorekeeper_count`, or `individual_matches.innings_verify_home`/`innings_verify_away`. Code accessing these uses `as any` casts. Re-run `npx supabase gen types` to regenerate when convenient.
+
 ### Racks Not Written to DB
 `racks_eight_ball` table exists but the scoring screen currently only writes match-level totals (`home_points_earned`, `away_points_earned`, `innings`) at match end. Per-rack data is not persisted.
 
@@ -573,6 +597,11 @@ Both buttons on the superuser dashboard sign out and navigate away (Switch User 
 
 ### Priority 1 — Core Stability (testing phase)
 - [ ] Fix any bugs found during two-device testing
+- [x] Offline write queue + match data cache (NetInfo → SecureStore → MMKV sync queue)
+- [x] Two-device innings verification (Realtime + DB columns)
+- [x] Follower mode (second device read-only + innings verify)
+- [x] Put-up offline fallback (10s timeout → manual selection)
+- [x] Scorekeeper count setting (LO Settings page → `leagues.scorekeeper_count`)
 - [ ] Persist per-rack data to `racks_eight_ball` during scoring (currently only match totals saved at end)
 - [ ] Wire `scorecard_sessions` for basic conflict detection (prevent two devices scoring same match simultaneously)
 
@@ -650,4 +679,4 @@ ON CONFLICT (id) DO NOTHING;
 
 ---
 
-*Last updated: 2026-03-04 | Maintained alongside codebase in `/apa/SPEC.md`*
+*Last updated: 2026-03-08 | Maintained alongside codebase in `/apa/SPEC.md`*

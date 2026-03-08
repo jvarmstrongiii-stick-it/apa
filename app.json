@@ -17,7 +17,9 @@
       "supportsTablet": true,
       "bundleIdentifier": "com.apaleague.app",
       "infoPlist": {
-        "NSFaceIDUsageDescription": "Use Face ID to unlock admin features"
+        "NSFaceIDUsageDescription": "Use Face ID to unlock admin features",
+        "NSSpeechRecognitionUsageDescription": "Used to ask APA rules questions by voice.",
+        "NSMicrophoneUsageDescription": "Used to ask APA rules questions by voice."
       }
     },
     "android": {
@@ -29,7 +31,8 @@
       "package": "com.apaleague.app",
       "permissions": [
         "android.permission.USE_BIOMETRIC",
-        "android.permission.USE_FINGERPRINT"
+        "android.permission.USE_FINGERPRINT",
+        "android.permission.RECORD_AUDIO"
       ]
     },
     "web": {
@@ -41,7 +44,8 @@
       "expo-router",
       "expo-secure-store",
       "expo-local-authentication",
-      "expo-updates"
+      "expo-updates",
+      "expo-speech-recognition"
     ],
     "updates": {
       "url": "https://u.expo.dev/a44f5cb7-0c98-41dc-b922-676e661b09e0"

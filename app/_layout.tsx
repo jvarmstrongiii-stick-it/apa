@@ -9,6 +9,8 @@ import { OfflineProvider } from '../src/providers/OfflineProvider';
 import { ThemeProvider } from '../src/providers/ThemeProvider';
 import { theme } from '../src/constants/theme';
 import { UpdateScreen } from '../src/components/UpdateScreen';
+import RulesAssistant from '../src/components/RulesAssistant';
+import { ANTHROPIC_API_KEY } from '../src/constants/config';
 
 // Prevent the splash screen from auto-hiding
 SplashScreen.preventAutoHideAsync();
@@ -91,6 +93,7 @@ export default function RootLayout() {
                 animation: 'fade',
               }}
             />
+            <RulesAssistant apiKey={ANTHROPIC_API_KEY} />
           </OfflineProvider>
         </AuthProvider>
       </ThemeProvider>
