@@ -28,6 +28,7 @@ interface ScorableMatch {
   game_format: '8-ball' | '9-ball';
   current_individual_match: number | null; // null if not started
   individual_match_ids: string[]; // UUIDs of individual_matches rows (for pending-write badge)
+  scorekeeper_count: 1 | 2;
 }
 
 const STATUS_COLORS: Record<ScorableStatus, string> = {
@@ -59,6 +60,10 @@ function ScorableMatchItem({
   onScheduledPress: (matchId: string, isHome: boolean) => void;
   onResetPress: (matchId: string) => void;
 }) {
+  const handleFollowPress = () => {
+    // Follow goes to progress screen so follower can pick which individual match to observe
+    router.push(`/(team)/(tabs)/scoring/${match.id}/progress`);
+  };
   const matchDate = new Date(match.scheduled_date);
 
   const handlePress = () => {
@@ -70,9 +75,7 @@ function ScorableMatchItem({
         router.push(`/(team)/(tabs)/scoring/${match.id}/0`);
         break;
       case 'in_progress':
-        router.push(
-          `/(team)/(tabs)/scoring/${match.id}/${match.current_individual_match ?? 0}`
-        );
+        router.push(`/(team)/(tabs)/scoring/${match.id}/progress`);
         break;
     }
   };
@@ -167,6 +170,14 @@ function ScorableMatchItem({
         <Ionicons name="arrow-forward" size={20} color="#FFFFFF" />
       </Pressable>
 
+      {/* Follow Match button — second scorekeeper on 2-scorekeeper leagues */}
+      {match.status === 'in_progress' && match.scorekeeper_count === 2 && (
+        <Pressable style={styles.followButton} onPress={handleFollowPress}>
+          <Ionicons name="eye-outline" size={16} color={theme.colors.primary} />
+          <Text style={styles.followButtonText}>Follow Match</Text>
+        </Pressable>
+      )}
+
       {match.status !== 'scheduled' && (
         <Pressable style={styles.resetButton} onPress={() => onResetPress(match.id)}>
           <Text style={styles.resetButtonText}>Reset Match</Text>
@@ -238,7 +249,7 @@ export default function TeamScoringIndex() {
 
     const { data, error } = await supabase
       .from('team_matches')
-      .select('id, match_date, status, home_team_id, away_team_id, home_team:teams!home_team_id(name), away_team:teams!away_team_id(name), division:divisions!division_id(location, league:leagues!league_id(game_format)), individual_matches(id, match_order)')
+      .select('id, match_date, status, home_team_id, away_team_id, home_team:teams!home_team_id(name), away_team:teams!away_team_id(name), division:divisions!division_id(location, league:leagues!league_id(game_format, scorekeeper_count)), individual_matches(id, match_order)')
       .or(`home_team_id.eq.${teamId},away_team_id.eq.${teamId}`)
       .in('status', ['scheduled', 'lineup_set', 'in_progress'])
       .order('match_date', { ascending: true });
@@ -266,6 +277,7 @@ export default function TeamScoringIndex() {
         game_format: gameFormat as '8-ball' | '9-ball',
         current_individual_match: currentMatch,
         individual_match_ids: individualMatches.map((im: any) => im.id),
+        scorekeeper_count: (m.division?.league?.scorekeeper_count ?? 1) as 1 | 2,
       };
     });
     setMatches(mapped);
@@ -481,6 +493,22 @@ const styles = StyleSheet.create({
     color: theme.colors.textSecondary,
     textAlign: 'center',
     lineHeight: 20,
+  },
+  followButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    paddingVertical: 10,
+    marginTop: 6,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: theme.colors.primary + '40',
+  },
+  followButtonText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: theme.colors.primary,
   },
   resetButton: {
     alignItems: 'center',

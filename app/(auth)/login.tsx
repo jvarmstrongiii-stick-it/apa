@@ -44,6 +44,18 @@ interface StoredPrefs {
   teams: TeamOption[];  // teams confirmed on this device during the current season
 }
 
+interface PlayerIdentity {
+  playerId: string;
+  playerName: string;
+  isCaptain: boolean;
+}
+
+interface RosterPlayer {
+  id: string;
+  name: string;
+  isCaptain: boolean;
+}
+
 type ListItem =
   | { kind: 'team'; data: TeamOption }
   | { kind: 'header'; label: string };
@@ -66,6 +78,28 @@ async function loadPrefs(): Promise<StoredPrefs | null> {
 
 async function savePrefs(prefs: StoredPrefs): Promise<void> {
   await SecureStore.setItemAsync(PREFS_KEY, JSON.stringify(prefs));
+}
+
+function identityKey(teamId: string): string {
+  return `player-identity-${teamId}`;
+}
+
+async function loadIdentity(teamId: string): Promise<PlayerIdentity | null> {
+  try {
+    const raw = await SecureStore.getItemAsync(identityKey(teamId));
+    if (!raw) return null;
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+async function saveIdentity(teamId: string, identity: PlayerIdentity): Promise<void> {
+  await SecureStore.setItemAsync(identityKey(teamId), JSON.stringify(identity));
+}
+
+async function clearIdentity(teamId: string): Promise<void> {
+  await SecureStore.deleteItemAsync(identityKey(teamId));
 }
 
 // ---------------------------------------------------------------------------
@@ -110,17 +144,20 @@ const MATCH_STATUS_COLORS: Record<MatchOption['status'], string> = {
 // ---------------------------------------------------------------------------
 
 export default function LoginScreen() {
-  const { signInTeam } = useAuthContext();
+  const { signInTeam, refreshProfile } = useAuthContext();
 
   const [teams, setTeams] = useState<TeamOption[]>([]);
   const [myTeams, setMyTeams] = useState<TeamOption[]>([]);
   const [activeLeagueIds, setActiveLeagueIds] = useState<string[]>([]);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [selectedTeam, setSelectedTeam] = useState<TeamOption | null>(null);
-  const [step, setStep] = useState<'pick' | 'confirm' | 'match'>('pick');
+  const [step, setStep] = useState<'pick' | 'confirm' | 'who_are_you' | 'match'>('pick');
   const [availableMatches, setAvailableMatches] = useState<MatchOption[]>([]);
+  const [rosterPlayers, setRosterPlayers] = useState<RosterPlayer[]>([]);
+  const [storedIdentity, setStoredIdentity] = useState<PlayerIdentity | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isSigningIn, setIsSigningIn] = useState(false);
+  const [isSettingIdentity, setIsSettingIdentity] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   // ------------------------------------------------------------------
@@ -227,15 +264,28 @@ export default function LoginScreen() {
         router.replace(`/(team)/(tabs)/scoring/${match.id}/0`);
         break;
       case 'in_progress':
-        router.replace(
-          `/(team)/(tabs)/scoring/${match.id}/${match.currentIndividualMatch ?? 0}`
-        );
+        router.replace(`/(team)/(tabs)/scoring/${match.id}/progress`);
         break;
     }
   }, []);
 
   // ------------------------------------------------------------------
-  // Sign in + persist team + fetch matches
+  // Navigate after identity is confirmed
+  // ------------------------------------------------------------------
+
+  const proceedAfterIdentity = useCallback((matches: MatchOption[]) => {
+    if (matches.length === 0) {
+      router.replace('/');
+    } else if (matches.length === 1) {
+      navigateToMatch(matches[0]);
+    } else {
+      setAvailableMatches(matches);
+      setStep('match');
+    }
+  }, [navigateToMatch]);
+
+  // ------------------------------------------------------------------
+  // Sign in + persist team + fetch matches + roster → who_are_you step
   // ------------------------------------------------------------------
 
   const handleSignIn = async () => {
@@ -254,33 +304,46 @@ export default function LoginScreen() {
         teams: [selectedTeam, ...existing.filter((t) => t.id !== selectedTeam.id)],
       });
 
-      // Fetch available matches for this team
-      const { data } = await supabase
-        .from('team_matches')
-        .select(`
-          id, match_date, status, home_team_id, away_team_id,
-          home_team:teams!home_team_id(name),
-          away_team:teams!away_team_id(name),
-          division:divisions!division_id(location, league:leagues!league_id(game_format)),
-          individual_matches(id, match_order)
-        `)
-        .or(`home_team_id.eq.${selectedTeam.id},away_team_id.eq.${selectedTeam.id}`)
-        .in('status', ['scheduled', 'lineup_set', 'in_progress'])
-        .order('match_date', { ascending: true });
+      // Fetch matches and roster in parallel
+      const [matchesResult, rosterResult, identity] = await Promise.all([
+        supabase
+          .from('team_matches')
+          .select(`
+            id, match_date, status, home_team_id, away_team_id,
+            home_team:teams!home_team_id(name),
+            away_team:teams!away_team_id(name),
+            division:divisions!division_id(location, league:leagues!league_id(game_format)),
+            individual_matches(id, match_order)
+          `)
+          .or(`home_team_id.eq.${selectedTeam.id},away_team_id.eq.${selectedTeam.id}`)
+          .in('status', ['scheduled', 'lineup_set', 'in_progress'])
+          .order('match_date', { ascending: true }),
+        supabase
+          .from('team_players')
+          .select('is_captain, player:players!player_id(id, first_name, last_name)')
+          .eq('team_id', selectedTeam.id)
+          .is('left_at', null),
+        loadIdentity(selectedTeam.id),
+      ]);
 
-      const matches = mapMatches(data ?? [], selectedTeam.id);
+      const matches = mapMatches(matchesResult.data ?? [], selectedTeam.id);
 
-      if (matches.length === 0) {
-        // No active matches — go to dashboard
-        router.replace('/');
-      } else if (matches.length === 1) {
-        // Only one match — go straight to it
-        navigateToMatch(matches[0]);
-      } else {
-        // Multiple matches — let player choose
-        setAvailableMatches(matches);
-        setStep('match');
-      }
+      const roster: RosterPlayer[] = (rosterResult.data ?? [])
+        .map((tp: any) => ({
+          id: tp.player?.id ?? '',
+          name: `${tp.player?.first_name ?? ''} ${tp.player?.last_name ?? ''}`.trim(),
+          isCaptain: tp.is_captain,
+        }))
+        .filter((p: RosterPlayer) => p.id)
+        .sort((a: RosterPlayer, b: RosterPlayer) => {
+          if (a.isCaptain !== b.isCaptain) return a.isCaptain ? -1 : 1;
+          return a.name.localeCompare(b.name);
+        });
+
+      setAvailableMatches(matches);
+      setRosterPlayers(roster);
+      setStoredIdentity(identity);
+      setStep('who_are_you');
     } catch (err: any) {
       setError(err?.message ?? 'Sign in failed. Please contact your League Operator.');
     } finally {
@@ -289,12 +352,47 @@ export default function LoginScreen() {
   };
 
   // ------------------------------------------------------------------
+  // Identity confirmed — set on profile, save locally, proceed
+  // ------------------------------------------------------------------
+
+  const handleIdentityConfirmed = async (identity: PlayerIdentity) => {
+    if (!selectedTeam) return;
+
+    setIsSettingIdentity(true);
+    setError(null);
+
+    try {
+      await supabase.rpc('set_player_identity', { p_player_id: identity.playerId });
+      await saveIdentity(selectedTeam.id, identity);
+      await refreshProfile();  // update isCaptain in auth context before navigating
+      proceedAfterIdentity(availableMatches);
+    } catch (err: any) {
+      setError('Could not save identity. Please try again.');
+      setIsSettingIdentity(false);
+    }
+  };
+
+  // ------------------------------------------------------------------
   // Render picker list item
   // ------------------------------------------------------------------
 
+  const clearMyTeams = async () => {
+    await SecureStore.deleteItemAsync(PREFS_KEY);
+    setMyTeams([]);
+  };
+
   const renderPickerItem = ({ item }: { item: ListItem }) => {
     if (item.kind === 'header') {
-      return <Text style={styles.sectionHeader}>{item.label}</Text>;
+      return (
+        <View style={styles.sectionHeaderRow}>
+          <Text style={styles.sectionHeader}>{item.label}</Text>
+          {item.label === 'My Teams' && (
+            <Pressable onPress={clearMyTeams} hitSlop={8}>
+              <Text style={styles.sectionHeaderClear}>Clear</Text>
+            </Pressable>
+          )}
+        </View>
+      );
     }
 
     const { data } = item;
@@ -423,6 +521,128 @@ export default function LoginScreen() {
                   <Text style={styles.changeTeamText}>Change Team</Text>
                 </Pressable>
               </>
+
+            ) : step === 'who_are_you' && selectedTeam ? (
+              /* ----------------------------------------------------------------
+               * Who are you? step
+               * If identity is stored: show "Continue as X?" verification.
+               * Otherwise: show full roster picker.
+               * --------------------------------------------------------------- */
+              <>
+                {storedIdentity ? (
+                  /* Returning user — verify identity */
+                  <>
+                    <Text style={styles.whoTitle}>Welcome back!</Text>
+                    <Text style={styles.whoSubtitle}>Continuing as</Text>
+
+                    <View style={styles.identityBox}>
+                      <View style={styles.identityAvatar}>
+                        <Text style={styles.identityAvatarText}>
+                          {storedIdentity.playerName
+                            .split(' ')
+                            .map((n) => n[0])
+                            .join('')}
+                        </Text>
+                      </View>
+                      <View style={{ flex: 1 }}>
+                        <Text style={styles.identityName}>{storedIdentity.playerName}</Text>
+                        {storedIdentity.isCaptain && (
+                          <Text style={styles.identityCaptainLabel}>Captain</Text>
+                        )}
+                      </View>
+                    </View>
+
+                    <Pressable
+                      style={({ pressed }) => [
+                        styles.signInButton,
+                        pressed && !isSettingIdentity && styles.signInButtonPressed,
+                        isSettingIdentity && styles.signInButtonDisabled,
+                      ]}
+                      onPress={() => handleIdentityConfirmed(storedIdentity)}
+                      disabled={isSettingIdentity}
+                    >
+                      {isSettingIdentity ? (
+                        <ActivityIndicator color="#FFFFFF" />
+                      ) : (
+                        <Text style={styles.signInButtonText}>
+                          Yes, that's me
+                        </Text>
+                      )}
+                    </Pressable>
+
+                    <Pressable
+                      style={styles.changeTeamButton}
+                      onPress={() => {
+                        clearIdentity(selectedTeam.id);
+                        setStoredIdentity(null);
+                      }}
+                      disabled={isSettingIdentity}
+                    >
+                      <Text style={styles.changeTeamText}>Not me</Text>
+                    </Pressable>
+                  </>
+                ) : (
+                  /* First time — full roster picker */
+                  <>
+                    <Text style={styles.whoTitle}>Which player are you?</Text>
+                    <Text style={styles.whoSubtitle}>
+                      Select your name from {selectedTeam.name}'s roster
+                    </Text>
+
+                    {rosterPlayers.length === 0 ? (
+                      <Text style={styles.emptyText}>
+                        No roster found. Ask your League Operator to import the scoresheet.
+                      </Text>
+                    ) : (
+                      rosterPlayers.map((player) => (
+                        <Pressable
+                          key={player.id}
+                          style={({ pressed }) => [
+                            styles.rosterRow,
+                            pressed && styles.rosterRowPressed,
+                          ]}
+                          onPress={() =>
+                            handleIdentityConfirmed({
+                              playerId: player.id,
+                              playerName: player.name,
+                              isCaptain: player.isCaptain,
+                            })
+                          }
+                          disabled={isSettingIdentity}
+                        >
+                          <View style={styles.rosterAvatar}>
+                            <Text style={styles.rosterAvatarText}>
+                              {player.name.split(' ').map((n) => n[0]).join('')}
+                            </Text>
+                          </View>
+                          <Text style={styles.rosterPlayerName}>{player.name}</Text>
+                          {player.isCaptain && (
+                            <View style={styles.captainBadge}>
+                              <Text style={styles.captainBadgeText}>Captain</Text>
+                            </View>
+                          )}
+                          <Ionicons
+                            name="chevron-forward"
+                            size={18}
+                            color={theme.colors.textSecondary}
+                          />
+                        </Pressable>
+                      ))
+                    )}
+
+                    <Pressable
+                      style={[styles.changeTeamButton, { marginTop: 20 }]}
+                      onPress={() => {
+                        setStep('pick');
+                        setSelectedTeam(null);
+                      }}
+                    >
+                      <Text style={styles.changeTeamText}>Change Team</Text>
+                    </Pressable>
+                  </>
+                )}
+              </>
+
             ) : step === 'confirm' && selectedTeam ? (
               /* ----------------------------------------------------------------
                * Confirmation step
@@ -674,6 +894,103 @@ const styles = StyleSheet.create({
     fontWeight: '500',
   },
 
+  // Who are you step
+  whoTitle: {
+    fontSize: 20,
+    fontWeight: '700',
+    color: theme.colors.text,
+    textAlign: 'center',
+    marginBottom: 6,
+  },
+  whoSubtitle: {
+    fontSize: 14,
+    color: theme.colors.textSecondary,
+    textAlign: 'center',
+    marginBottom: 20,
+  },
+  identityBox: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 14,
+    backgroundColor: theme.colors.primary + '15',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: theme.colors.primary,
+    paddingHorizontal: 18,
+    paddingVertical: 14,
+    marginBottom: 20,
+  },
+  identityAvatar: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    backgroundColor: theme.colors.primary + '30',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  identityAvatarText: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: theme.colors.primary,
+  },
+  identityName: {
+    fontSize: 17,
+    fontWeight: '700',
+    color: theme.colors.text,
+  },
+  identityCaptainLabel: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#FF9800',
+    marginTop: 2,
+  },
+  rosterRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    paddingVertical: 14,
+    paddingHorizontal: 14,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: theme.colors.border,
+    backgroundColor: theme.colors.background,
+    marginBottom: 8,
+  },
+  rosterRowPressed: {
+    opacity: 0.75,
+    borderColor: theme.colors.primary,
+  },
+  rosterAvatar: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    backgroundColor: theme.colors.primary + '20',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  rosterAvatarText: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: theme.colors.primary,
+  },
+  rosterPlayerName: {
+    flex: 1,
+    fontSize: 15,
+    fontWeight: '600',
+    color: theme.colors.text,
+  },
+  captainBadge: {
+    backgroundColor: '#FF980020',
+    borderRadius: 6,
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+  },
+  captainBadgeText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#FF9800',
+  },
+
   // Match selection step
   matchPickerSubtitle: {
     fontSize: 15,
@@ -828,6 +1145,17 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     color: theme.colors.text,
     marginBottom: 14,
+  },
+  sectionHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingRight: 4,
+  },
+  sectionHeaderClear: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: theme.colors.textSecondary,
   },
   sectionHeader: {
     fontSize: 11,

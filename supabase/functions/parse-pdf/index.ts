@@ -606,12 +606,17 @@ async function findOrCreatePlayer(
       .maybeSingle();
 
     if (data) {
-      // Member number is immutable; name can change — always update it
-      await db.from('players').update({
+      // Member number is immutable; name and SL can change — always update them.
+      // Write to both skill_level (backward compat) and the format-specific column.
+      const slUpdate: Record<string, unknown> = {
         first_name:  firstName,
         last_name:   lastName,
         skill_level: player.skillLevel,
-      }).eq('id', data.id);
+      };
+      if (gameFormat === 'eight_ball') slUpdate.eight_ball_sl = player.skillLevel;
+      else                             slUpdate.nine_ball_sl  = player.skillLevel;
+
+      await db.from('players').update(slUpdate).eq('id', data.id);
       return data.id;
     }
   }
@@ -627,17 +632,21 @@ async function findOrCreatePlayer(
 
   if (byName) return byName.id;
 
-  // Create new player
+  // Create new player — populate both skill_level and format-specific column
+  const newPlayerData: Record<string, unknown> = {
+    first_name:    firstName,
+    last_name:     lastName,
+    member_number: player.memberNumber,
+    skill_level:   player.skillLevel,
+    game_format:   gameFormat,
+    is_active:     true,
+  };
+  if (gameFormat === 'eight_ball') newPlayerData.eight_ball_sl = player.skillLevel;
+  else                             newPlayerData.nine_ball_sl  = player.skillLevel;
+
   const { data: created, error } = await db
     .from('players')
-    .insert({
-      first_name:    firstName,
-      last_name:     lastName,
-      member_number: player.memberNumber,
-      skill_level:   player.skillLevel,
-      game_format:   gameFormat,
-      is_active:     true,
-    })
+    .insert(newPlayerData)
     .select('id')
     .single();
 
@@ -645,11 +654,20 @@ async function findOrCreatePlayer(
   return created.id;
 }
 
-async function upsertTeamPlayer(db: DB, teamId: string, playerId: string, matchesPlayed: number): Promise<void> {
+async function upsertTeamPlayer(
+  db: DB,
+  teamId: string,
+  playerId: string,
+  matchesPlayed: number,
+  isCaptain: boolean,
+): Promise<void> {
+  // is_captain is always written — the scoresheet is authoritative.
+  // First player per team = captain (true); all others reset to false.
+  // This ensures a captain change on a new scoresheet is immediately reflected.
   const { error } = await db
     .from('team_players')
     .upsert(
-      { team_id: teamId, player_id: playerId, is_captain: false, matches_played: matchesPlayed },
+      { team_id: teamId, player_id: playerId, matches_played: matchesPlayed, is_captain: isCaptain },
       { onConflict: 'team_id,player_id' },
     );
 
@@ -752,16 +770,17 @@ serve(async (req: Request) => {
       const awayTeamId = await findOrCreateTeam(supabaseAdmin, divisionId, match.awayTeam.number, match.awayTeam.name);
       await findOrCreateTeamMatch(supabaseAdmin, divisionId, homeTeamId, awayTeamId, match.matchDate, match.weekNumber, importId);
 
-      const allPlayers: Array<{ player: PlayerData; teamId: string; team: 'home' | 'away' }> = [
-        ...match.homePlayers.map((p) => ({ player: p, teamId: homeTeamId, team: 'home' as const })),
-        ...match.awayPlayers.map((p) => ({ player: p, teamId: awayTeamId, team: 'away' as const })),
+      // isFirst: true for the first player on each team's list — APA rule: first player = captain.
+      const allPlayers: Array<{ player: PlayerData; teamId: string; isFirst: boolean }> = [
+        ...match.homePlayers.map((p, i) => ({ player: p, teamId: homeTeamId, isFirst: i === 0 })),
+        ...match.awayPlayers.map((p, i) => ({ player: p, teamId: awayTeamId, isFirst: i === 0 })),
       ];
 
       for (let i = 0; i < allPlayers.length; i++) {
-        const { player, teamId, team } = allPlayers[i];
+        const { player, teamId, isFirst } = allPlayers[i];
         try {
           const playerId = await findOrCreatePlayer(supabaseAdmin, player, match.gameFormat);
-          await upsertTeamPlayer(supabaseAdmin, teamId, playerId, player.matchesPlayed);
+          await upsertTeamPlayer(supabaseAdmin, teamId, playerId, player.matchesPlayed, isFirst);
 
           await supabaseAdmin.from('import_rows').insert({
             import_id:  importId,

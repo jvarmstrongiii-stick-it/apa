@@ -137,11 +137,13 @@ const INACTIVITY_TIMEOUT_MS = 60_000;
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export default function IndividualMatchScoringScreen() {
-  const { matchId, individualMatchIndex } = useLocalSearchParams<{
+  const { matchId, individualMatchIndex, mode } = useLocalSearchParams<{
     matchId: string;
     individualMatchIndex: string;
+    mode?: string;
   }>();
   const matchIndex = parseInt(individualMatchIndex ?? '0');
+  const isFollower = mode === 'follower';
   const { profile } = useAuthContext();
   const teamId = profile?.team_id;
 
@@ -181,7 +183,10 @@ export default function IndividualMatchScoringScreen() {
   // ── Innings verification ──────────────────────────────────────────────────────
   //  After a rack ends the scorer reviews the inning count and adjusts if needed.
   const [verifyMyInnings, setVerifyMyInnings] = useState<number>(0);  // this device's entry
-  const [verifyTheirInnings, setVerifyTheirInnings] = useState<number | null>(null); // DB value
+  // Two-device verify state (only used when scorekeeperCount === 2)
+  const [verifySubmitted, setVerifySubmitted] = useState(false);        // we submitted our count to DB
+  const [verifyPartnerCount, setVerifyPartnerCount] = useState<number | null>(null); // partner's count from DB
+  const [verifyDiscrepancy, setVerifyDiscrepancy] = useState(false);    // counts differ
   const [pendingRackWinner, setPendingRackWinner] = useState<Side | null>(null);
 
   // ── Action phase ─────────────────────────────────────────────────────────────
@@ -226,7 +231,7 @@ export default function IndividualMatchScoringScreen() {
   const gameOverOptions: GameOverOption[] =
     isBreakTurn
       ? GAME_OVER_BREAK
-      : currentShooterIsBreaker && gameFormat === '8-ball'
+      : currentShooterIsBreaker && gameFormat === '8-ball' && totalInnings === 0
         ? GAME_OVER_BREAKER_RUN
         : gameFormat === '8-ball'
           ? GAME_OVER_NORMAL_8
@@ -620,7 +625,9 @@ export default function IndividualMatchScoringScreen() {
     // Pause for innings verification before advancing
     setPendingRackWinner(rackWinner);
     setVerifyMyInnings(rackInnings);  // pre-fill with our live count
-    setVerifyTheirInnings(null);       // will be read from DB
+    setVerifySubmitted(false);
+    setVerifyPartnerCount(null);
+    setVerifyDiscrepancy(false);
     setActionPhase('innings_verify');
     resetInactivity();
   }
@@ -655,6 +662,132 @@ export default function IndividualMatchScoringScreen() {
       initRack(rackWinner);
     }
   }
+
+  // ─── Two-device innings verify: Realtime subscription ───────────────────────
+  // When scorekeeperCount === 2, subscribe to DB changes on this individual_match
+  // row to detect when the partner has submitted their innings count.
+
+  useEffect(() => {
+    if (scorekeeperCount !== 2 || !individualMatchId || actionPhase !== 'innings_verify') return;
+
+    const channel = supabase
+      .channel(`innings_verify_${individualMatchId}`)
+      .on(
+        'postgres_changes',
+        {
+          event: 'UPDATE',
+          schema: 'public',
+          table: 'individual_matches',
+          filter: `id=eq.${individualMatchId}`,
+        },
+        (payload) => {
+          const row = payload.new as any;
+          const myCol = isFollower
+            ? (ourSide === 'home' ? 'innings_verify_away' : 'innings_verify_home')
+            : (ourSide === 'home' ? 'innings_verify_home' : 'innings_verify_away');
+          const theirCol = isFollower
+            ? (ourSide === 'home' ? 'innings_verify_home' : 'innings_verify_away')
+            : (ourSide === 'home' ? 'innings_verify_away' : 'innings_verify_home');
+          const partnerVal: number | null = row[theirCol] ?? null;
+          const myVal: number | null = row[myCol] ?? null;
+
+          if (partnerVal !== null) {
+            setVerifyPartnerCount(partnerVal);
+          }
+
+          // Both sides submitted — check for agreement
+          if (myVal !== null && partnerVal !== null) {
+            if (myVal === partnerVal) {
+              // Counts agree: clear columns and advance
+              supabase
+                .from('individual_matches')
+                .update({ innings_verify_home: null, innings_verify_away: null } as any)
+                .eq('id', individualMatchId);
+              confirmInnings(myVal);
+            } else {
+              setVerifyDiscrepancy(true);
+            }
+          }
+        }
+      )
+      .subscribe();
+
+    return () => { channel.unsubscribe(); };
+    // confirmInnings intentionally omitted from deps — it's stable within a rack
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scorekeeperCount, individualMatchId, actionPhase, ourSide]);
+
+  /**
+   * Two-device verify: submit this device's innings count to the DB column.
+   * The Realtime listener above will handle the response when partner submits theirs.
+   */
+  async function submitMyInningsCount(count: number) {
+    if (!individualMatchId || !ourSide) return;
+    setVerifySubmitted(true);
+    // Follower writes the opposite column from the primary scorer so each device
+    // has an independent slot (home vs away) for cross-verification.
+    const col = isFollower
+      ? (ourSide === 'home' ? 'innings_verify_away' : 'innings_verify_home')
+      : (ourSide === 'home' ? 'innings_verify_home' : 'innings_verify_away');
+    await supabase
+      .from('individual_matches')
+      .update({ [col]: count } as any)
+      .eq('id', individualMatchId);
+  }
+
+  /**
+   * Two-device verify: one device re-submits the reconciled count after a discrepancy.
+   * This overwrites both columns with the agreed value so both devices advance.
+   */
+  async function reconcileInnings(agreedCount: number) {
+    if (!individualMatchId) return;
+    setVerifyDiscrepancy(false);
+    await supabase
+      .from('individual_matches')
+      .update({ innings_verify_home: agreedCount, innings_verify_away: agreedCount } as any)
+      .eq('id', individualMatchId);
+    // Realtime will fire and both devices will call confirmInnings(agreedCount)
+  }
+
+  // ─── Follower mode: Realtime subscription ────────────────────────────────────
+  // Follower device watches individual_matches for innings_verify columns becoming
+  // non-null (primary scorer submitted their count), then transitions to verify UI.
+
+  useEffect(() => {
+    if (!isFollower || !individualMatchId) return;
+
+    const channel = supabase
+      .channel(`follower_${individualMatchId}`)
+      .on(
+        'postgres_changes',
+        {
+          event: 'UPDATE',
+          schema: 'public',
+          table: 'individual_matches',
+          filter: `id=eq.${individualMatchId}`,
+        },
+        (payload) => {
+          const row = payload.new as any;
+          // Primary scorer submitted — enter innings verify on follower device
+          if (
+            (row.innings_verify_home !== null || row.innings_verify_away !== null) &&
+            actionPhase !== 'innings_verify'
+          ) {
+            setVerifyMyInnings(rackInnings);
+            setVerifySubmitted(false);
+            setVerifyPartnerCount(null);
+            setVerifyDiscrepancy(false);
+            setActionPhase('innings_verify');
+          }
+          // Sync scoreboard totals from primary scorer's row
+          if (row.racks_home !== undefined) setRacksWonHome(row.racks_home);
+          if (row.racks_away !== undefined) setRacksWonAway(row.racks_away);
+        }
+      )
+      .subscribe();
+
+    return () => { channel.unsubscribe(); };
+  }, [isFollower, individualMatchId, actionPhase, rackInnings]);
 
   // ─── Save & navigate ─────────────────────────────────────────────────────────
 
@@ -759,31 +892,43 @@ export default function IndividualMatchScoringScreen() {
           </Pressable>
           <View style={styles.headerCenter}>
             <Text style={styles.headerTitle}>Match {matchIndex + 1} of 5</Text>
-            <Text style={styles.headerSubtitle}>Lag for Break</Text>
+            <Text style={styles.headerSubtitle}>
+              {isFollower ? 'Following · Waiting to start' : 'Lag for Break'}
+            </Text>
           </View>
           <View style={styles.headerButton} />
         </View>
 
-        <View style={styles.lagContainer}>
-          <Text style={styles.lagTitle}>Who won the lag?</Text>
-          <Text style={styles.lagBody}>The lag winner breaks first.</Text>
+        {isFollower ? (
+          <View style={styles.lagContainer}>
+            <Ionicons name="eye-outline" size={48} color={theme.colors.textSecondary} />
+            <Text style={styles.lagTitle}>Following Match</Text>
+            <Text style={styles.lagBody}>
+              Waiting for the primary scorekeeper to start the lag…
+            </Text>
+          </View>
+        ) : (
+          <View style={styles.lagContainer}>
+            <Text style={styles.lagTitle}>Who won the lag?</Text>
+            <Text style={styles.lagBody}>The lag winner breaks first.</Text>
 
-          <Pressable
-            style={({ pressed }) => [styles.lagBtn, pressed && styles.pressed]}
-            onPress={() => initRack('home')}
-          >
-            <Text style={styles.lagBtnName}>{homePlayer.name}</Text>
-            <Text style={styles.lagBtnSub}>Home · SL {homePlayer.skill_level}</Text>
-          </Pressable>
+            <Pressable
+              style={({ pressed }) => [styles.lagBtn, pressed && styles.pressed]}
+              onPress={() => initRack('home')}
+            >
+              <Text style={styles.lagBtnName}>{homePlayer.name}</Text>
+              <Text style={styles.lagBtnSub}>Home · SL {homePlayer.skill_level}</Text>
+            </Pressable>
 
-          <Pressable
-            style={({ pressed }) => [styles.lagBtn, pressed && styles.pressed]}
-            onPress={() => initRack('away')}
-          >
-            <Text style={styles.lagBtnName}>{awayPlayer.name}</Text>
-            <Text style={styles.lagBtnSub}>Away · SL {awayPlayer.skill_level}</Text>
-          </Pressable>
-        </View>
+            <Pressable
+              style={({ pressed }) => [styles.lagBtn, pressed && styles.pressed]}
+              onPress={() => initRack('away')}
+            >
+              <Text style={styles.lagBtnName}>{awayPlayer.name}</Text>
+              <Text style={styles.lagBtnSub}>Away · SL {awayPlayer.skill_level}</Text>
+            </Pressable>
+          </View>
+        )}
       </SafeAreaView>
     );
   }
@@ -800,11 +945,23 @@ export default function IndividualMatchScoringScreen() {
         </Pressable>
         <View style={styles.headerCenter}>
           <Text style={styles.headerTitle}>Match {matchIndex + 1} of 5</Text>
-          <Text style={styles.headerSubtitle}>{gameFormat} · Rack {rackNumber}</Text>
+          <View style={styles.headerSubtitleRow}>
+            {isFollower && (
+              <View style={styles.followingBadge}>
+                <Ionicons name="eye-outline" size={11} color={theme.colors.primary} />
+                <Text style={styles.followingBadgeText}>Following</Text>
+              </View>
+            )}
+            <Text style={styles.headerSubtitle}>{gameFormat} · Rack {rackNumber}</Text>
+          </View>
         </View>
-        <Pressable style={styles.headerButton} onPress={handleHandOff} hitSlop={12}>
-          <Ionicons name="swap-horizontal-outline" size={24} color={theme.colors.textSecondary} />
-        </Pressable>
+        {isFollower ? (
+          <Pressable style={styles.headerButton} onPress={handleHandOff} hitSlop={12}>
+            <Ionicons name="swap-horizontal-outline" size={24} color={theme.colors.textSecondary} />
+          </Pressable>
+        ) : (
+          <View style={styles.headerButton} />
+        )}
       </View>
 
       {/* ── Scoreboard ── */}
@@ -935,8 +1092,18 @@ export default function IndividualMatchScoringScreen() {
           </View>
         )}
 
+        {/* ── Follower read-only notice ── */}
+        {isFollower && actionPhase === 'turn' && (
+          <View style={styles.followerNotice}>
+            <Ionicons name="eye-outline" size={20} color={theme.colors.textSecondary} />
+            <Text style={styles.followerNoticeText}>
+              You are following this match.{'\n'}Controls will appear when a rack ends.
+            </Text>
+          </View>
+        )}
+
         {/* ── Main turn buttons ── */}
-        {actionPhase === 'turn' && !timeoutActive && !timeoutExpired && (
+        {!isFollower && actionPhase === 'turn' && !timeoutActive && !timeoutExpired && (
           <View style={styles.btnGrid}>
 
             <Pressable
@@ -999,7 +1166,7 @@ export default function IndividualMatchScoringScreen() {
         )}
 
         {/* ── Foul sub-options ── */}
-        {actionPhase === 'foul_options' && (
+        {!isFollower && actionPhase === 'foul_options' && (
           <View style={styles.subPanel}>
             <Text style={styles.subPanelTitle}>Select Foul Type</Text>
             {foulOptions.map(foul => (
@@ -1021,7 +1188,7 @@ export default function IndividualMatchScoringScreen() {
         )}
 
         {/* ── Game Over sub-options ── */}
-        {actionPhase === 'game_over_options' && (
+        {!isFollower && actionPhase === 'game_over_options' && (
           <View style={styles.subPanel}>
             <Text style={styles.subPanelTitle}>
               {isBreakTurn ? 'Break Result' : 'End of Rack'}
@@ -1057,48 +1224,143 @@ export default function IndividualMatchScoringScreen() {
         {/* ── Innings verification ── */}
         {actionPhase === 'innings_verify' && (
           <View style={styles.verifyPanel}>
-            <Text style={styles.verifyTitle}>Confirm Innings</Text>
-            <Text style={styles.verifyBody}>
-              Check your tally and adjust below if needed.
-            </Text>
-
-            <View style={styles.verifyCounterRow}>
-              <Pressable
-                style={styles.verifyCounterBtn}
-                onPress={() => setVerifyMyInnings(n => Math.max(0, n - 1))}
-              >
-                <Ionicons name="remove" size={28} color={theme.colors.text} />
-              </Pressable>
-              <Text style={styles.verifyCounterValue}>{verifyMyInnings}</Text>
-              <Pressable
-                style={styles.verifyCounterBtn}
-                onPress={() => setVerifyMyInnings(n => n + 1)}
-              >
-                <Ionicons name="add" size={28} color={theme.colors.text} />
-              </Pressable>
-            </View>
-
-            <Text style={styles.verifyHint}>
-              Tap +/− to correct the count if the live tally missed an inning.
-            </Text>
-
-            {lastSnapshot && (
-              <Pressable
-                style={({ pressed }) => [styles.undoBtn, { width: '100%' }, pressed && styles.pressed]}
-                onPress={() => { resetInactivity(); undoLastAction(); }}
-              >
-                <Ionicons name="arrow-undo" size={18} color={theme.colors.textSecondary} />
-                <Text style={styles.undoBtnText}>Undo Game Over</Text>
-              </Pressable>
+            {scorekeeperCount === 1 ? (
+              /* ── Single-device flow ── */
+              <>
+                <Text style={styles.verifyTitle}>Confirm Innings</Text>
+                <Text style={styles.verifyBody}>
+                  Check your tally and adjust below if needed.
+                </Text>
+                <View style={styles.verifyCounterRow}>
+                  <Pressable
+                    style={styles.verifyCounterBtn}
+                    onPress={() => setVerifyMyInnings(n => Math.max(0, n - 1))}
+                  >
+                    <Ionicons name="remove" size={28} color={theme.colors.text} />
+                  </Pressable>
+                  <Text style={styles.verifyCounterValue}>{verifyMyInnings}</Text>
+                  <Pressable
+                    style={styles.verifyCounterBtn}
+                    onPress={() => setVerifyMyInnings(n => n + 1)}
+                  >
+                    <Ionicons name="add" size={28} color={theme.colors.text} />
+                  </Pressable>
+                </View>
+                <Text style={styles.verifyHint}>
+                  Tap +/− to correct the count if the live tally missed an inning.
+                </Text>
+                {lastSnapshot && (
+                  <Pressable
+                    style={({ pressed }) => [styles.undoBtn, { width: '100%' }, pressed && styles.pressed]}
+                    onPress={() => { resetInactivity(); undoLastAction(); }}
+                  >
+                    <Ionicons name="arrow-undo" size={18} color={theme.colors.textSecondary} />
+                    <Text style={styles.undoBtnText}>Undo Game Over</Text>
+                  </Pressable>
+                )}
+                <Pressable
+                  style={({ pressed }) => [styles.verifyConfirmBtn, pressed && styles.pressed]}
+                  onPress={() => confirmInnings(verifyMyInnings)}
+                >
+                  <Text style={styles.verifyConfirmText}>Confirmed — Start Next Rack</Text>
+                </Pressable>
+              </>
+            ) : verifyDiscrepancy ? (
+              /* ── Two-device: discrepancy ── */
+              <>
+                <Text style={styles.verifyTitle}>Innings Mismatch</Text>
+                <Text style={styles.verifyBody}>
+                  Your counts don't agree. One scorekeeper should adjust and re-submit.
+                </Text>
+                <View style={styles.verifyDiscrepancyRow}>
+                  <View style={styles.verifyDiscrepancyChip}>
+                    <Text style={styles.verifyDiscrepancyLabel}>You</Text>
+                    <Text style={styles.verifyDiscrepancyValue}>{verifyMyInnings}</Text>
+                  </View>
+                  <Text style={styles.verifyDiscrepancyVs}>vs</Text>
+                  <View style={styles.verifyDiscrepancyChip}>
+                    <Text style={styles.verifyDiscrepancyLabel}>Partner</Text>
+                    <Text style={styles.verifyDiscrepancyValue}>{verifyPartnerCount}</Text>
+                  </View>
+                </View>
+                <Text style={styles.verifyHint}>
+                  Agree on the correct number, then one device taps below.
+                </Text>
+                <View style={styles.verifyCounterRow}>
+                  <Pressable
+                    style={styles.verifyCounterBtn}
+                    onPress={() => setVerifyMyInnings(n => Math.max(0, n - 1))}
+                  >
+                    <Ionicons name="remove" size={28} color={theme.colors.text} />
+                  </Pressable>
+                  <Text style={styles.verifyCounterValue}>{verifyMyInnings}</Text>
+                  <Pressable
+                    style={styles.verifyCounterBtn}
+                    onPress={() => setVerifyMyInnings(n => n + 1)}
+                  >
+                    <Ionicons name="add" size={28} color={theme.colors.text} />
+                  </Pressable>
+                </View>
+                <Pressable
+                  style={({ pressed }) => [styles.verifyConfirmBtn, pressed && styles.pressed]}
+                  onPress={() => reconcileInnings(verifyMyInnings)}
+                >
+                  <Text style={styles.verifyConfirmText}>Use This Count for Both</Text>
+                </Pressable>
+              </>
+            ) : verifySubmitted ? (
+              /* ── Two-device: waiting for partner ── */
+              <>
+                <Text style={styles.verifyTitle}>Waiting for Partner</Text>
+                <Text style={styles.verifyBody}>
+                  Your count: {verifyMyInnings} innings.{'\n'}
+                  Waiting for the other scorekeeper to submit their count…
+                </Text>
+                <Ionicons name="hourglass-outline" size={48} color={theme.colors.textSecondary} />
+              </>
+            ) : (
+              /* ── Two-device: enter and submit ── */
+              <>
+                <Text style={styles.verifyTitle}>Submit Your Inning Count</Text>
+                <Text style={styles.verifyBody}>
+                  Check your tally and adjust if needed, then submit.
+                  Your partner will submit theirs on the other device.
+                </Text>
+                <View style={styles.verifyCounterRow}>
+                  <Pressable
+                    style={styles.verifyCounterBtn}
+                    onPress={() => setVerifyMyInnings(n => Math.max(0, n - 1))}
+                  >
+                    <Ionicons name="remove" size={28} color={theme.colors.text} />
+                  </Pressable>
+                  <Text style={styles.verifyCounterValue}>{verifyMyInnings}</Text>
+                  <Pressable
+                    style={styles.verifyCounterBtn}
+                    onPress={() => setVerifyMyInnings(n => n + 1)}
+                  >
+                    <Ionicons name="add" size={28} color={theme.colors.text} />
+                  </Pressable>
+                </View>
+                <Text style={styles.verifyHint}>
+                  Tap +/− to correct the count if the live tally missed an inning.
+                </Text>
+                {lastSnapshot && (
+                  <Pressable
+                    style={({ pressed }) => [styles.undoBtn, { width: '100%' }, pressed && styles.pressed]}
+                    onPress={() => { resetInactivity(); undoLastAction(); }}
+                  >
+                    <Ionicons name="arrow-undo" size={18} color={theme.colors.textSecondary} />
+                    <Text style={styles.undoBtnText}>Undo Game Over</Text>
+                  </Pressable>
+                )}
+                <Pressable
+                  style={({ pressed }) => [styles.verifyConfirmBtn, pressed && styles.pressed]}
+                  onPress={() => submitMyInningsCount(verifyMyInnings)}
+                >
+                  <Text style={styles.verifyConfirmText}>Submit My Count</Text>
+                </Pressable>
+              </>
             )}
-
-            {/* Confirm and advance to next rack */}
-            <Pressable
-              style={({ pressed }) => [styles.verifyConfirmBtn, pressed && styles.pressed]}
-              onPress={() => confirmInnings(verifyMyInnings)}
-            >
-              <Text style={styles.verifyConfirmText}>Confirmed — Start Next Rack</Text>
-            </Pressable>
           </View>
         )}
 
@@ -1151,6 +1413,38 @@ const styles = StyleSheet.create({
     color: theme.colors.textSecondary,
     textTransform: 'uppercase',
     fontWeight: '600',
+  },
+  headerSubtitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  followingBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 3,
+    backgroundColor: theme.colors.primary + '18',
+    borderRadius: 5,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+  },
+  followingBadgeText: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: theme.colors.primary,
+    textTransform: 'uppercase',
+  },
+  followerNotice: {
+    alignItems: 'center',
+    gap: 10,
+    paddingVertical: 32,
+    paddingHorizontal: 24,
+  },
+  followerNoticeText: {
+    fontSize: 14,
+    color: theme.colors.textSecondary,
+    textAlign: 'center',
+    lineHeight: 20,
   },
 
   // ── Lag ──
@@ -1608,4 +1902,41 @@ const styles = StyleSheet.create({
   // Misc
   pressed: { opacity: 0.8 },
   textRight: { textAlign: 'right' },
+
+  // Two-device innings discrepancy
+  verifyDiscrepancyRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 16,
+    marginVertical: 12,
+  },
+  verifyDiscrepancyChip: {
+    alignItems: 'center',
+    backgroundColor: theme.colors.surfaceLight,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: theme.colors.border,
+    paddingHorizontal: 20,
+    paddingVertical: 10,
+    minWidth: 80,
+  },
+  verifyDiscrepancyLabel: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: theme.colors.textSecondary,
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+    marginBottom: 4,
+  },
+  verifyDiscrepancyValue: {
+    fontSize: 32,
+    fontWeight: '700',
+    color: theme.colors.text,
+  },
+  verifyDiscrepancyVs: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: theme.colors.textSecondary,
+  },
 });

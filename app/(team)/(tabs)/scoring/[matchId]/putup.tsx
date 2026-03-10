@@ -83,6 +83,8 @@ export default function PutUpScreen() {
   const [opponentTeamId, setOpponentTeamId] = useState<string | null>(null);
   const [indMatch, setIndMatch] = useState<IndividualMatchRecord | null>(null);
   const [roster, setRoster] = useState<RosterPlayer[]>([]);
+  const [opponentRoster, setOpponentRoster] = useState<RosterPlayer[]>([]);
+  const [rosterTab, setRosterTab] = useState<'ours' | 'theirs'>('ours');
   const [opponentPlayer, setOpponentPlayer] = useState<PlayerDisplay | null>(null);
   const [saving, setSaving] = useState(false);
   const [opponentConnected, setOpponentConnected] = useState(false);
@@ -209,16 +211,29 @@ export default function PutUpScreen() {
         .eq('team_id', teamId)
         .eq('is_active', true);
 
-      const mapped: RosterPlayer[] = (rosterData ?? [])
-        .map((tp: any) => ({
-          id: tp.player?.id ?? '',
-          name: `${tp.player?.first_name ?? ''} ${tp.player?.last_name ?? ''}`.trim(),
-          skill_level: tp.player?.skill_level ?? 0,
-          matches_played: tp.matches_played ?? 0,
-        }))
-        .filter((p: RosterPlayer) => p.id);
+      const mapRoster = (data: any[]): RosterPlayer[] =>
+        data
+          .map((tp: any) => ({
+            id: tp.player?.id ?? '',
+            name: `${tp.player?.first_name ?? ''} ${tp.player?.last_name ?? ''}`.trim(),
+            skill_level: tp.player?.skill_level ?? 0,
+            matches_played: tp.matches_played ?? 0,
+          }))
+          .filter((p: RosterPlayer) => p.id);
 
+      const mapped = mapRoster(rosterData ?? []);
       setRoster(mapped);
+
+      // Fetch opponent roster (requires migration 00018: authenticated SELECT on team_players)
+      const { data: oppRosterData } = await supabase
+        .from('team_players')
+        .select(
+          'matches_played, player:players!player_id(id, first_name, last_name, skill_level)'
+        )
+        .eq('team_id', oppTeamId)
+        .eq('is_active', true);
+
+      setOpponentRoster(mapRoster(oppRosterData ?? []));
 
       // Fetch existing individual match, or create it
       let { data: im } = await supabase
@@ -348,13 +363,15 @@ export default function PutUpScreen() {
   // ─── Offline: proceed with manually selected players ──────────────────────
   const proceedOffline = async () => {
     if (!indMatch || !ourSide || saving) return;
-    const homeId = offlineHomeId ?? roster[0]?.id;
-    const awayId = offlineAwayId ?? roster[0]?.id;
+    const homeRosterForOffline = ourSide === 'home' ? roster : opponentRoster;
+    const awayRosterForOffline = ourSide === 'away' ? roster : opponentRoster;
+    const homeId = offlineHomeId ?? homeRosterForOffline[0]?.id;
+    const awayId = offlineAwayId ?? awayRosterForOffline[0]?.id;
     if (!homeId || !awayId) return;
 
     setSaving(true);
-    const homeSL = roster.find(p => p.id === homeId)?.skill_level ?? 3;
-    const awaySL = roster.find(p => p.id === awayId)?.skill_level ?? 3;
+    const homeSL = homeRosterForOffline.find(p => p.id === homeId)?.skill_level ?? 3;
+    const awaySL = awayRosterForOffline.find(p => p.id === awayId)?.skill_level ?? 3;
 
     await supabase
       .from('individual_matches')
@@ -425,10 +442,25 @@ export default function PutUpScreen() {
     </Pressable>
   );
 
+  // ─── Opponent roster (view-only, no selection) ───────────────────────────
+  const renderOpponentRosterItem = ({ item }: { item: RosterPlayer }) => (
+    <View style={[styles.rosterRow, styles.rosterRowReadOnly]}>
+      <View style={styles.rosterInfo}>
+        <Text style={styles.rosterName}>{item.name}</Text>
+        <Text style={styles.rosterStats}>
+          SL {item.skill_level} · {item.matches_played} MP
+        </Text>
+      </View>
+    </View>
+  );
+
   // ─── Render phase content ─────────────────────────────────────────────────
   const renderContent = () => {
     // Offline fallback — let the scorekeeper manually set both players
     if (offlineFallback && phase !== 'loading' && phase !== 'ready') {
+      const homeRosterForOffline = ourSide === 'home' ? roster : opponentRoster;
+      const awayRosterForOffline = ourSide === 'away' ? roster : opponentRoster;
+
       return (
         <ScrollView contentContainerStyle={styles.offlineContainer}>
           <View style={styles.offlineBanner}>
@@ -440,7 +472,7 @@ export default function PutUpScreen() {
           </View>
 
           <Text style={styles.rosterLabel}>Home player:</Text>
-          {roster.map(p => (
+          {homeRosterForOffline.map(p => (
             <Pressable
               key={`home-${p.id}`}
               style={[styles.rosterRow, offlineHomeId === p.id && styles.rosterRowSelected]}
@@ -457,7 +489,7 @@ export default function PutUpScreen() {
           ))}
 
           <Text style={[styles.rosterLabel, { marginTop: 20 }]}>Away player:</Text>
-          {roster.map(p => (
+          {awayRosterForOffline.map(p => (
             <Pressable
               key={`away-${p.id}`}
               style={[styles.rosterRow, offlineAwayId === p.id && styles.rosterRowSelected]}
@@ -508,14 +540,51 @@ export default function PutUpScreen() {
                 Select the player you are sending to the table.
               </Text>
             </View>
-            <Text style={styles.rosterLabel}>Select your player:</Text>
-            <FlatList
-              data={roster}
-              keyExtractor={(item) => item.id}
-              renderItem={renderRosterItem}
-              contentContainerStyle={styles.listContent}
-              showsVerticalScrollIndicator={false}
-            />
+            {/* Roster toggle — browse opponent roster for matchup context */}
+            <View style={styles.tabRow}>
+              <Pressable
+                style={[styles.tab, rosterTab === 'ours' && styles.tabActive]}
+                onPress={() => setRosterTab('ours')}
+              >
+                <Text style={[styles.tabText, rosterTab === 'ours' && styles.tabTextActive]}>
+                  Our Roster
+                </Text>
+              </Pressable>
+              <Pressable
+                style={[styles.tab, rosterTab === 'theirs' && styles.tabActive]}
+                onPress={() => setRosterTab('theirs')}
+              >
+                <Text style={[styles.tabText, rosterTab === 'theirs' && styles.tabTextActive]}>
+                  Their Roster
+                </Text>
+              </Pressable>
+            </View>
+            {rosterTab === 'ours' ? (
+              <>
+                <Text style={styles.rosterLabel}>Select your player:</Text>
+                <FlatList
+                  data={roster}
+                  keyExtractor={(item) => item.id}
+                  renderItem={renderRosterItem}
+                  contentContainerStyle={styles.listContent}
+                  showsVerticalScrollIndicator={false}
+                />
+              </>
+            ) : (
+              <>
+                <Text style={styles.rosterLabel}>Opponent roster (view only):</Text>
+                <FlatList
+                  data={opponentRoster}
+                  keyExtractor={(item) => item.id}
+                  renderItem={renderOpponentRosterItem}
+                  contentContainerStyle={styles.listContent}
+                  showsVerticalScrollIndicator={false}
+                  ListEmptyComponent={
+                    <Text style={styles.emptyRosterText}>Opponent roster unavailable</Text>
+                  }
+                />
+              </>
+            )}
           </>
         );
 
@@ -555,14 +624,51 @@ export default function PutUpScreen() {
                 </View>
               </View>
             </View>
-            <Text style={styles.rosterLabel}>Select your response player:</Text>
-            <FlatList
-              data={roster}
-              keyExtractor={(item) => item.id}
-              renderItem={renderRosterItem}
-              contentContainerStyle={styles.listContent}
-              showsVerticalScrollIndicator={false}
-            />
+            {/* Roster toggle — browse opponent full roster for matchup context */}
+            <View style={styles.tabRow}>
+              <Pressable
+                style={[styles.tab, rosterTab === 'ours' && styles.tabActive]}
+                onPress={() => setRosterTab('ours')}
+              >
+                <Text style={[styles.tabText, rosterTab === 'ours' && styles.tabTextActive]}>
+                  Our Roster
+                </Text>
+              </Pressable>
+              <Pressable
+                style={[styles.tab, rosterTab === 'theirs' && styles.tabActive]}
+                onPress={() => setRosterTab('theirs')}
+              >
+                <Text style={[styles.tabText, rosterTab === 'theirs' && styles.tabTextActive]}>
+                  Their Roster
+                </Text>
+              </Pressable>
+            </View>
+            {rosterTab === 'ours' ? (
+              <>
+                <Text style={styles.rosterLabel}>Select your response player:</Text>
+                <FlatList
+                  data={roster}
+                  keyExtractor={(item) => item.id}
+                  renderItem={renderRosterItem}
+                  contentContainerStyle={styles.listContent}
+                  showsVerticalScrollIndicator={false}
+                />
+              </>
+            ) : (
+              <>
+                <Text style={styles.rosterLabel}>Opponent roster (view only):</Text>
+                <FlatList
+                  data={opponentRoster}
+                  keyExtractor={(item) => item.id}
+                  renderItem={renderOpponentRosterItem}
+                  contentContainerStyle={styles.listContent}
+                  showsVerticalScrollIndicator={false}
+                  ListEmptyComponent={
+                    <Text style={styles.emptyRosterText}>Opponent roster unavailable</Text>
+                  }
+                />
+              </>
+            )}
           </>
         );
 
@@ -830,5 +936,42 @@ const styles = StyleSheet.create({
     fontSize: 17,
     fontWeight: '700',
     color: '#FFFFFF',
+  },
+  // Roster toggle tabs
+  tabRow: {
+    flexDirection: 'row',
+    marginHorizontal: 20,
+    marginBottom: 4,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: theme.colors.border,
+    overflow: 'hidden',
+  },
+  tab: {
+    flex: 1,
+    paddingVertical: 10,
+    alignItems: 'center',
+    backgroundColor: theme.colors.surface,
+  },
+  tabActive: {
+    backgroundColor: theme.colors.primary + '18',
+  },
+  tabText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: theme.colors.textSecondary,
+  },
+  tabTextActive: {
+    color: theme.colors.primary,
+  },
+  rosterRowReadOnly: {
+    opacity: 0.75,
+  },
+  emptyRosterText: {
+    textAlign: 'center',
+    paddingVertical: 24,
+    fontSize: 14,
+    color: theme.colors.textSecondary,
+    fontStyle: 'italic',
   },
 });

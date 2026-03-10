@@ -1,5 +1,5 @@
 # Pool League Scoring App — Working Specification
-**Living Document | Updated 2026-03-09**
+**Living Document | Updated 2026-03-08**
 
 ---
 
@@ -52,8 +52,10 @@ Three user roles: **Team** (scorekeepers, anonymous auth), **LO** (League Operat
 ### Team (Player) Auth
 - `supabase.auth.signInAnonymously()` — no credentials
 - `supabase.rpc('set_player_team', { p_team_id })` upserts profile (SECURITY DEFINER, bypasses RLS)
+- `supabase.rpc('set_player_identity', { p_player_id })` sets `profiles.player_id` after player selects themselves from roster (SECURITY DEFINER)
 - Cold launch always shows login screen (existing session signed out on bootstrap)
 - "My Teams" preference stored in `expo-secure-store` key `team-prefs`
+- Player identity stored in `expo-secure-store` key `player-identity-${teamId}` = `{ playerId, playerName, isCaptain }`
 - Season fingerprint: active league IDs — change clears stored teams
 
 ### LO (League Operator) Auth
@@ -71,10 +73,13 @@ Three user roles: **Team** (scorekeepers, anonymous auth), **LO** (League Operat
 - Login via `/(auth)/admin-login`
 - Dashboard: Switch User (→ player login) | Log Out (→ admin login)
 
-### Login Flow (3 steps) — Team side
+### Login Flow (4 steps) — Team side
 1. **Pick**: "Continue as Player" (team picker, plain list from scheduled matches only) | "League Operator Login"
 2. **Confirm**: "You selected [team]?" → Yes / Change Team
-3. **Match**: sign in → fetch active matches → 0 matches → dashboard | 1 match → auto-navigate | 2+ matches → list
+3. **Who Are You?**: roster picker — player selects their own name; sets `profiles.player_id` + stores identity in SecureStore. Returning users see "Continue as [Name]?" with Yes / Not Me options.
+4. **Match**: fetch active matches → 0 matches → dashboard | 1 match → auto-navigate | 2+ matches → list
+
+`refreshProfile()` is called after identity is set so `isCaptain` is accurate before navigating to team screens.
 
 ### Match Navigation by Status (from login)
 | Status | Route |
@@ -104,6 +109,7 @@ Three user roles: **Team** (scorekeepers, anonymous auth), **LO** (League Operat
 | id | uuid PK | FK → auth.users |
 | role | user_role | DEFAULT 'team' |
 | team_id | uuid | FK → teams (team role only) |
+| player_id | uuid | FK → players ON DELETE SET NULL — which player this session belongs to; set via `set_player_identity` RPC after "Who Are You?" step |
 | first_name | text | |
 | last_name | text | |
 | display_name | text | |
@@ -147,9 +153,12 @@ Three user roles: **Team** (scorekeepers, anonymous auth), **LO** (League Operat
 | id | uuid PK | |
 | first_name | text | |
 | last_name | text | |
-| member_number | text UNIQUE | APA 5-digit ID |
-| skill_level | integer | 1–9, DEFAULT 5 |
+| member_number | text UNIQUE | APA member ID — believed to be 8 digits with 3-digit area prefix (e.g. 189-XXXXX); stored as-is from scoresheet; 5-digit input used in Add Player UI for now |
+| skill_level | integer | 1–9, DEFAULT 5; kept for backward compat (scoring screens read this) |
+| eight_ball_sl | integer | 1–9, nullable — APA 8-ball skill level; populated from PDF import and Add Player |
+| nine_ball_sl | integer | 1–9, nullable — APA 9-ball skill level; populated from PDF import and Add Player |
 | game_format | game_format | |
+| is_active | boolean | DEFAULT true |
 
 ### team_players (roster junction)
 | Column | Type | Notes |
@@ -157,12 +166,16 @@ Three user roles: **Team** (scorekeepers, anonymous auth), **LO** (League Operat
 | id | uuid PK | |
 | team_id | uuid | FK → teams |
 | player_id | uuid | FK → players |
-| skill_level | integer | team-specific SL override |
+| skill_level | integer | DEFAULT 3 (new/unknown players start at SL 3 per APA); updated on PDF import |
 | is_active | boolean | DEFAULT true |
-| is_captain | boolean | DEFAULT false |
-| matches_played | integer | DEFAULT 0 |
+| is_captain | boolean | DEFAULT false; set `true` for first player per team on each PDF import (authoritative — resets on re-import); captains can also promote co-captains manually via roster edit |
+| matches_played | integer | DEFAULT 0; updated on each PDF import |
 | joined_at | timestamptz | |
-| left_at | timestamptz | |
+| left_at | timestamptz | Soft-delete: set when player is removed from roster via captain edit |
+
+**Captain detection:** The first player listed for each team on the APA scoresheet (`homePlayers[0]` / `awayPlayers[0]`) is the captain. `is_captain = true` is written for that player on every import; all other players get `is_captain = false`. Manually-promoted co-captains are reset by the next import — re-promote after each re-import if needed.
+
+**Division rule:** A player may not appear on two teams in the same division during the same session, but may be on teams in different divisions or game formats.
 
 ### skill_level_history
 | Column | Type | Notes |
@@ -283,6 +296,9 @@ Legend: **✅ BUILT** | **🔶 PARTIAL** | **❌ NOT STARTED**
 | Cold-launch always show login | ✅ BUILT | Bootstrap signs out session |
 | Remembered team preferences | ✅ BUILT | `expo-secure-store` |
 | Season fingerprint (clear stale teams) | ✅ BUILT | |
+| Player identity selection ("Who Are You?") | ✅ BUILT | 4th login step; roster picker sets `profiles.player_id`; identity persisted in SecureStore per team |
+| Returning user identity verification | ✅ BUILT | "Continue as [Name]?" with Yes / Not Me; clears stored identity on Not Me |
+| Captain status in auth context | ✅ BUILT | `isCaptain: boolean` in `useAuthContext()`; derived from `team_players.is_captain` after identity set |
 | Logout (team side) | ✅ BUILT | Icon in dashboard header + Quick Actions |
 | Switch User / Log Out (superuser side) | ✅ BUILT | Header buttons on superuser dashboard |
 | Forgot Password / reset | ❌ NOT STARTED | `supabase.auth.resetPasswordForEmail()` ready to wire up; Password Reset button in LO edit modal sends reset email |
@@ -336,9 +352,24 @@ Legend: **✅ BUILT** | **🔶 PARTIAL** | **❌ NOT STARTED**
 | Feature | Status | Notes |
 |---|---|---|
 | Player management via import | ✅ BUILT | |
+| Re-import updates captain flag | ✅ BUILT | First player per team = captain on every import; authoritative |
 | Direct player CRUD | ❌ NOT STARTED | |
 | Direct team CRUD | ❌ NOT STARTED | |
 | Skill level history tracking | 🔶 PARTIAL | DB table exists; not surfaced in UI |
+
+### Captain — Roster Management
+| Feature | Status | Notes |
+|---|---|---|
+| Roster screen (view) | ✅ BUILT | Sorted captain-first then by SL desc; captain badge; "(You)" label on own card |
+| Edit mode (captain-only) | ✅ BUILT | Edit button in header; gated by `isCaptain` from auth context |
+| Remove player from roster | ✅ BUILT | Soft-delete: sets `team_players.left_at`; confirmation alert; cannot remove self |
+| Promote / demote co-captain | ✅ BUILT | Star toggle per player card in edit mode; confirmation alert |
+| Add Player | ✅ BUILT | Shown when `editMode && players.length < 8`; bottom sheet modal |
+| Add Player — member number lookup | ✅ BUILT | `find_player_by_member_number` RPC; auto-fills name + SL for team's game format |
+| Add Player — manual entry (new player) | ✅ BUILT | If member # not found; SL defaults to 3 |
+| Add Player — division conflict check | ✅ BUILT | `check_division_conflict` RPC; blocks if player already on another team in same division |
+| Add Player — re-join (left_at was set) | ✅ BUILT | Upsert clears `left_at` on conflict |
+| Player check-in (match night attendance) | ❌ NOT STARTED | Future; requires player identity; captain sees who's checked in during put-up |
 
 ### Scorekeeping — Match Start
 | Feature | Status | Notes |
@@ -412,12 +443,30 @@ Legend: **✅ BUILT** | **🔶 PARTIAL** | **❌ NOT STARTED**
 | Feature | Status | Notes |
 |---|---|---|
 | Floating 🎱 FAB (all screens) | ✅ BUILT | `src/components/RulesAssistant.tsx`; absolute overlay, above tab bar |
-| Chat panel (slide-up modal) | ✅ BUILT | Chip shortcuts, message bubbles, "Show Me the Proof" citations |
+| Chat panel (slide-up modal) | ✅ BUILT | Chip shortcuts, message bubbles, proof + audit buttons |
 | Anthropic API integration | ✅ BUILT | `claude-opus-4-6`; key in `.env` as `EXPO_PUBLIC_ANTHROPIC_KEY` |
-| Quick question chips (wrapped rows) | ✅ BUILT | 6 preset questions visible without scrolling |
-| "Show Me the Proof" citations | ✅ BUILT | Secondary API call extracts rule number + quote |
-| Press-and-hold voice input | 🔶 PARTIAL | Logic built; requires custom dev client (`expo-speech-recognition`); degrades gracefully in Expo Go — big 🎱 mic button shown, hint switches to "Type your question below" |
+| Quick question chips (wrapped rows) | ✅ BUILT | 9 preset questions: 6 game rules + 23-Rule, coaching, timeout rules |
+| "Show Me the Proof" citations | ✅ BUILT | Secondary API call extracts verbatim rule number + quote |
+| "Are You Sure?" audit | ✅ BUILT | Deeper audit call; ✅/⚠️/❌ verdict card; injects correction into session; logs flag to `rules_flags` only for CORRECTED/NUANCE ADDED (CONFIRMED = no LO action needed, not logged) |
+| Session-corrected answers | ✅ BUILT | CORRECTED/NUANCE ADDED verdicts injected into conversation so Claude carries them forward |
+| LO-approved prompt overrides | ✅ BUILT | Fetches approved `prompt_overrides` from Supabase on open; prepended to system prompt |
+| Press-and-hold voice input | 🔶 PARTIAL | Requires custom dev client (`expo-speech-recognition`); degrades gracefully in Expo Go |
 | FAB long-press mic entry | ✅ BUILT | Hold the floating 🎱 to start recording before panel opens |
+| Team Manual rules in knowledge base | ✅ BUILT | 23-Rule, 19-Rule, full timeout nuance (SL-based count, charge/no-charge, secondary consultation, Masters exception), forfeits, scoresheet |
+| Rule 16 combo clarification | ✅ BUILT | System prompt explicit: 8-ball can NEVER be pocketed same shot as last category ball, regardless of order |
+
+### Admin/LO — Flagged Rules Review
+| Feature | Status | Notes |
+|---|---|---|
+| `rules_flags` table | ✅ BUILT | Player-challenged Q&As with verdict + proposed correction; migration `00024_rules_flags.sql` |
+| `prompt_overrides` table | ✅ BUILT | LO-approved corrections injected into widget system prompt on next open |
+| Disputes dashboard tile | ✅ BUILT | Red alert icon, disputed match count; navigates to `/(admin)/(tabs)/matches?filter=disputed` |
+| Rules Flags dashboard tile | ✅ BUILT | Gold flag icon, live pending count; separate from Disputes tile; navigates to review screen |
+| Flagged Rules review screen | ✅ BUILT | `/(admin)/rules-flags`; attribution, verdict badge, Q&A, proposed correction |
+| Approve correction | ✅ BUILT | Flag → approved + inserts into `prompt_overrides` |
+| Edit before approving | ✅ BUILT | Inline TextInput pre-filled with proposed correction |
+| Dismiss flag | ✅ BUILT | Flag → dismissed |
+| Player/team attribution | ✅ BUILT | Joined via `user_id → profiles.player_id → players.name` + `team_players → teams.name`; shows "Anonymous" until player identity implemented |
 
 ---
 
@@ -426,7 +475,7 @@ Legend: **✅ BUILT** | **🔶 PARTIAL** | **❌ NOT STARTED**
 | Screen | Route | Status | Notes |
 |---|---|---|---|
 | **AUTH** | | | |
-| Login | `/(auth)/login` | ✅ BUILT | 3-step: pick → confirm → match |
+| Login | `/(auth)/login` | ✅ BUILT | 4-step: pick → confirm → who_are_you → match |
 | Admin Login | `/(auth)/admin-login` | ✅ BUILT | Email/password (LO + superuser) |
 | Forgot Password | — | ❌ NOT STARTED | |
 | **TEAM** | | | |
@@ -440,7 +489,7 @@ Legend: **✅ BUILT** | **🔶 PARTIAL** | **❌ NOT STARTED**
 | Individual Match Scoring | `/(team)/(tabs)/scoring/[matchId]/[individualMatchIndex]` | ✅ BUILT | Full scoring screen |
 | Finalize | `/(team)/(tabs)/scoring/[matchId]/finalize` | ✅ BUILT | |
 | Schedule | `/(team)/(tabs)/schedule` | ❌ NOT STARTED | Linked from Quick Actions |
-| Roster | `/(team)/(tabs)/roster` | ❌ NOT STARTED | Linked from Quick Actions |
+| Roster | `/(team)/(tabs)/roster` | ✅ BUILT | View + captain edit mode (remove, add, co-captain promote) |
 | Match History | `/(team)/(tabs)/history` | ❌ NOT STARTED | Linked from Quick Actions |
 | Live Viewer (read-only) | — | ❌ NOT STARTED | |
 | Handoff Request (Initiator) | — | ❌ NOT STARTED | Full flow per spec §4.2 |
@@ -453,6 +502,7 @@ Legend: **✅ BUILT** | **🔶 PARTIAL** | **❌ NOT STARTED**
 | League Settings | — | ❌ NOT STARTED | Spec §2.2 |
 | Match List | `/(admin)/(tabs)/matches` | ✅ BUILT | |
 | Match Detail | `/(admin)/(tabs)/matches/[matchId]` | ✅ BUILT | Read-only + reopen |
+| Flagged Rules Review | `/(admin)/rules-flags` | ✅ BUILT | Approve/edit/dismiss player-flagged rule interpretations; feeds `prompt_overrides` |
 | Match Flag / Notes | — | ❌ NOT STARTED | |
 | Force Takeover Confirm | — | ❌ NOT STARTED | |
 | Import Rosters | `/(admin)/(tabs)/import` | ✅ BUILT | Swipe-to-delete; cancel during upload; staged-count banner |
@@ -534,9 +584,14 @@ Hardcoded in scoring screen and catchup wizard. Also exists in DB as `eight_ball
 4. Made 8 Ball, Pocket Not Marked (opponent wins)
 
 ### APA Scoresheet PDF Column Layout
-`SL | MP | Player # (5-digit member number) | Name`
+`SL | MP | Player # (member number) | Name`
 Digit block = column-major: all SLs, then all MPs, then all member numbers, then concatenated names.
-Member numbers are immutable identifiers. Names can change. `*` (incomplete) and `N` (not paid) markers stripped.
+Member numbers are immutable player identifiers. Names and SLs can change — both are updated on re-import.
+`*` (incomplete info) and `N` (not paid) markers stripped before parsing.
+
+**Captain detection:** The **first player listed** for each team on the scoresheet is the captain. `is_captain` is set `true` for that player and `false` for all others on every import. Each import is authoritative for captain status.
+
+**Dual SL columns:** On import, `eight_ball_sl` or `nine_ball_sl` is written based on the league's `game_format`, in addition to `skill_level` (kept for backward compat). New players whose SL shows as 0 on their first scoresheet are stored with the imported value; captain can correct in roster edit (SL range 1–9).
 
 ### Put-Up Flow
 After each individual match, the **loser** puts up first for the next match. The winning team then responds.
@@ -574,7 +629,7 @@ The following are hardcoded and would need to move to `LeagueSettings` for multi
 The `lineups` table (with skill cap enforcement) exists in DB but is not used by the scoring flow. Players are selected via put-up screen (stored directly on `individual_matches`), bypassing lineup pre-confirmation.
 
 ### Generated Types Stale
-`src/types/database.types.ts` (Supabase-generated) does not include `profiles.league_id`, `leagues.scorekeeper_count`, or `individual_matches.innings_verify_home`/`innings_verify_away`. Code accessing these uses `as any` casts. Re-run `npx supabase gen types` to regenerate when convenient.
+`src/types/database.types.ts` (Supabase-generated) does not include several newer columns: `profiles.league_id`, `profiles.player_id`, `leagues.scorekeeper_count`, `individual_matches.innings_verify_home`/`innings_verify_away`, `players.eight_ball_sl`/`nine_ball_sl`. Code accessing these uses `as any` casts. Re-run `npx supabase gen types` to regenerate when convenient.
 
 ### Racks Not Written to DB
 `racks_eight_ball` table exists but the scoring screen currently only writes match-level totals (`home_points_earned`, `away_points_earned`, `innings`) at match end. Per-rack data is not persisted.
@@ -607,7 +662,7 @@ Both buttons on the superuser dashboard sign out and navigate away (Switch User 
 
 ### Priority 2 — Missing Screens (team side)
 - [ ] Schedule screen `/(team)/(tabs)/schedule`
-- [ ] Roster screen `/(team)/(tabs)/roster`
+- [x] Roster screen `/(team)/(tabs)/roster` — view + captain edit (add/remove/co-captain)
 - [ ] Match History screen `/(team)/(tabs)/history`
 
 ### Priority 3 — Admin Completeness
@@ -678,5 +733,27 @@ ON CONFLICT (id) DO NOTHING;
 ```
 
 ---
+
+## Applied Migrations
+
+| # | File | Description |
+|---|---|---|
+| 00011 | `reconcile_schema.sql` | Rename columns; add skill_level, game_format, is_active to players; is_captain, left_at to team_players |
+| 00012 | `team_players_matches_played.sql` | Add matches_played to team_players |
+| 00013 | `public_login_policies.sql` | Public SELECT for login screen (scheduled matches, teams) |
+| 00014 | `set_player_team_fn.sql` | SECURITY DEFINER RPC: upsert profile with team_id |
+| 00015 | `putup_flow.sql` | put_up_team, resumed_at, innings verification columns, opponent RLS policies |
+| 00016 | `scorekeeper_count.sql` | leagues.scorekeeper_count column |
+| 00016 | `imported_status.sql` | match_status enum value 'imported' |
+| 00017 | `team_match_import_id.sql` | team_matches.import_id FK |
+| 00017 | `innings_verify_columns.sql` | innings_verify_home/away on individual_matches |
+| 00018 | `role_restructure.sql` | LO role restructure |
+| 00018 | `team_players_public_read.sql` | Authenticated users can read any team's roster (put-up screen needs opponent roster) |
+| 00019 | `active_flags.sql` | is_active on divisions and teams |
+| 00020 | `division_number.sql` | divisions.division_number column |
+| 00021 | `lo_rls_policies.sql` | RLS policies scoped to LO's league |
+| 00022 | `lo_profile_fields.sql` | profiles.first_name, last_name, email, league_id |
+| 00023 | `roster_edit_player_identity.sql` | players: eight_ball_sl + nine_ball_sl; team_players: default SL→3; profiles: player_id FK; helper functions; captain/roster RLS; set_player_identity, find_player_by_member_number, check_division_conflict RPCs |
+| 00024 | `rules_flags.sql` | rules_flags table (player-submitted rule challenges) + prompt_overrides table (LO-approved corrections); RLS: authenticated insert own flags, lo/admin read+update flags, authenticated read approved overrides, lo/admin insert+update overrides |
 
 *Last updated: 2026-03-08 | Maintained alongside codebase in `/apa/SPEC.md`*

@@ -13,6 +13,7 @@ import {
 } from 'react-native';
 import { NativeModules } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { supabase } from '../lib/supabase/client';
 
 // expo-speech-recognition requires a custom dev client — not available in Expo Go.
 // Gracefully degrade: mic button is hidden when the native module isn't linked.
@@ -99,7 +100,12 @@ RULE 14. FROZEN BALLS: A frozen ball is a ball that is touching either another b
 
 RULE 15. FOULS: If any of the following fouls are committed, the penalty is ball-in-hand for the opposing player. Ball-in-hand is the advantage given to a player when their opponent scratches or otherwise fouls, whereupon the player may place the cue ball anywhere on the playing surface. EXCEPTION: In 8-Ball, a scratch on the break requires the ball-in-hand to be executed from behind the head string and contact made with a ball outside the head string. Only the player or the Team Captain may officially call a foul. NOTE: A foul that is not called when it occurs cannot be called once the next shot has been taken. The ball-in-hand fouls are: (a) If the cue ball goes in a pocket, on the floor, or otherwise ends up off the playing surface. (b) Failure to hit the correct ball first. (c) Failure to hit a rail or pocket a ball after contact. A rail must be struck by either the cue ball or any other ball after the cue ball contacts the object ball. (d) If, after contacting a ball that is frozen to a rail, the shooter fails to meet frozen ball requirements. (e) Intentionally scooping the cue ball over another ball. (f) Receiving advice regarding game strategy from a fellow player, other than your designated coach, during a time-out. (g) Touching or causing the cue ball to move, outside of a ball-in-hand situation. (h) Altering the course of a moving cue ball, including a double-hit. (i) Anytime the cue ball makes contact with an accidentally moved ball. (j) The cue ball does not touch any object ball during the course of a shot. (k) Touching another ball on the table, while placing or adjusting the position of the cue ball, during a ball-in-hand.
 
-RULE 16. HOW TO WIN — 8-Ball: (a) You pocket all the balls of your category and legally pocket the 8-ball in a properly marked pocket. (b) Your opponent pockets the 8-ball out-of-turn or knocks the 8-ball on the floor. (c) Your opponent pockets the 8-ball in the wrong pocket. (d) Your opponent fails to properly mark the pocket where the 8-ball is pocketed, and you call loss of game. (e) Your opponent fouls the cue ball and pockets the 8-ball. (f) Your opponent alters the course of the 8-ball or the cue ball in an attempt to prevent a loss. (g) Your opponent scratches or knocks the cue ball off the table when playing the 8-ball. NOTE 1: If your opponent is shooting at the 8-ball and misses it altogether, commonly referred to as a table scratch, they have fouled and you receive ball-in-hand. You do not win because of this foul. NOTE 2: You may not play the 8-ball at the same time you play the last ball of your category. The 8-ball must be pocketed through a separate shot. If you pocket the 8-ball at the same time you pocket the last ball of your category, you lose the game. Marking the pocket: A coaster or some other reasonable marker must be placed next to the shooter's intended pocket. Marking the pocket with chalk is not recommended. Both players may use the same marker. Only one marker should remain on the table at a time. Contacting a pocket marker with the 8-ball is not a foul and the shot stands. 9-Ball: You legally pocket the 9-ball.`;
+RULE 16. HOW TO WIN — 8-Ball: (a) You pocket all the balls of your category and legally pocket the 8-ball in a properly marked pocket. (b) Your opponent pockets the 8-ball out-of-turn or knocks the 8-ball on the floor. (c) Your opponent pockets the 8-ball in the wrong pocket. (d) Your opponent fails to properly mark the pocket where the 8-ball is pocketed, and you call loss of game. (e) Your opponent fouls the cue ball and pockets the 8-ball. (f) Your opponent alters the course of the 8-ball or the cue ball in an attempt to prevent a loss. (g) Your opponent scratches or knocks the cue ball off the table when playing the 8-ball. NOTE 1: If your opponent is shooting at the 8-ball and misses it altogether, commonly referred to as a table scratch, they have fouled and you receive ball-in-hand. You do not win because of this foul. NOTE 2: You may not play the 8-ball at the same time you play the last ball of your category. The 8-ball must be pocketed through a separate shot. If you pocket the 8-ball at the same time you pocket the last ball of your category, you lose the game. Marking the pocket: A coaster or some other reasonable marker must be placed next to the shooter's intended pocket. Marking the pocket with chalk is not recommended. Both players may use the same marker. Only one marker should remain on the table at a time. Contacting a pocket marker with the 8-ball is not a foul and the shot stands. 9-Ball: You legally pocket the 9-ball.
+
+TEAM MANUAL — 23-RULE: The total combined skill levels of the five players fielded on a match night cannot exceed 23.
+TEAM MANUAL — 19-RULE: If only four players are available, their combined skill levels cannot exceed 19.
+TEAM MANUAL — SKILL LEVELS: 8-Ball SL 2–7; 9-Ball SL 1–9. Not established until 10 match scores on record.
+TEAM MANUAL — TIMEOUTS: Any member of the shooting team can call a timeout, but only the designated coach may approach the table. The coach may consult teammates before approaching. Skill Levels 1-3 receive two timeouts per game; Skill Levels 4-7 receive one. If a teammate calls a timeout it is charged to the team even if the player disagrees. If the player requests a timeout and the coach refuses, no timeout is charged. The coach may place the cue ball during ball-in-hand. Only the coach and player may be at the table during a timeout. Exception: if the shooting player voluntarily walks away from the table and is clearly not in the vicinity of the coaching conversation, the coach may invite one additional teammate to the table to discuss. Once the shooting player returns, only the designated coach may remain. No timeouts are allowed in Masters Division.`;
 
 // ─── System prompts ────────────────────────────────────────────────────────────
 const SYSTEM_PROMPT = `You are an expert on the American Poolplayers Association (APA) official rules. Answer questions based ONLY on the official APA Game Rules Booklet (Copyright 2023). Be clear, accurate, and cite specific rule numbers when possible. Keep answers concise but complete.
@@ -123,7 +129,63 @@ RULE 12. MARKING TABLE: Never mark cloth. Sportsmanship violation. Chalk on rail
 RULE 13. STALEMATES: Rerack, same breaker. 8-Ball: X in box. 9-Ball: points stand.
 RULE 14. FROZEN BALLS: Must be declared + verified. Object frozen to rail: drive cue ball to rail, OR drive frozen ball to rail/pocket, OR drive frozen ball into another ball causing rail/pocket contact. Cue ball frozen to own ball: shoot toward = legal. Cue ball frozen to opponent's ball: must shoot away; shooting toward = FOUL.
 RULE 15. FOULS (= ball-in-hand; 8-Ball break scratch = behind head string): (a) Cue ball off table. (b) Wrong ball first. (c) No rail/pocket after contact. (d) Frozen ball violation. (e) Intentional jump. (f) Illegal coaching. (g) Moving cue ball outside BIH. (h) Double hit / altering moving cue ball. (i) Cue ball hits accidentally moved ball. (j) Cue ball hits nothing. (k) Touching ball during BIH placement. Foul not called before next shot = too late.
-RULE 16. HOW TO WIN — 8-Ball: Pocket all your balls + 8-ball in marked pocket. Or opponent pockets 8-ball illegally (wrong pocket, wrong turn, no marker, while fouling, or alters its course, or scratches on it). Missing 8-ball = foul (BIH), NOT a win. Pocketing 8-ball same shot as last ball = LOSS. Mark the pocket with a coaster or marker. 9-Ball: Legally pocket the 9-ball.`;
+RULE 16. HOW TO WIN — 8-Ball: Pocket all your balls + 8-ball in marked pocket. Or opponent pockets 8-ball illegally (wrong pocket, wrong turn, no marker, while fouling, or alters its course, or scratches on it). Missing 8-ball = foul (BIH), NOT a win. Pocketing 8-ball same shot as last ball = LOSS. Mark the pocket with a coaster or marker. 9-Ball: Legally pocket the 9-ball.
+
+CRITICAL RULE 16 CLARIFICATION — COMMON MISCONCEPTION: A player can NEVER legally pocket the 8-ball on the same shot as their last category ball, regardless of the order the balls fall. Even if the player's last object ball drops into the pocket before the 8-ball on the same stroke, it is still a loss. The 8-ball MUST be pocketed on a completely separate shot. Combination shots where the cue ball or another ball drives the 8-ball into a pocket are only legal AFTER all category balls have already been pocketed in previous shots — never on the same shot as the last category ball.
+
+TEAM & MATCH RULES (from APA Team Manual):
+
+23-RULE: The combined skill levels of the five players fielded in a match night cannot exceed 23. Exceeding this limit may require replacing a player before the match begins.
+
+19-RULE: If a team only has 4 players available on match night, the combined skill levels of those 4 players cannot exceed 19.
+
+SKILL LEVELS: APA 8-Ball skill levels range from 2 to 7. APA 9-Ball skill levels range from 1 to 9. A player's skill level is not considered established until they have 10 match scores on record.
+
+COACHING / TIMEOUTS:
+- WHO CAN CALL A TIMEOUT: Any member of the shooting team — including the player — can request a timeout. However, only the designated coach may approach the table to advise the shooter. The coach may consult teammates first to reach a group consensus before approaching.
+- NUMBER OF TIMEOUTS PER GAME: Skill Levels 1-3 receive TWO timeouts per game. Skill Levels 4-7 receive ONE timeout per game. (Same for both 8-Ball and 9-Ball.)
+- TIMEOUT CHARGED OR NOT: If a teammate suggests a timeout and the player accepts, it is charged even if the player later disagrees. If the player requests a timeout and the coach refuses, NO timeout is charged.
+- WHO IS ALLOWED AT THE TABLE: Only the designated coach and the shooter may be at the table during a timeout.
+- SECONDARY CONSULTATION: If the shooting player voluntarily walks away from the table and is clearly not in the vicinity of the conversation, the coach may invite one additional teammate to the table to discuss. Once the shooting player returns, only the coach may remain.
+- WHAT THE COACH CAN DO: Advise on shot selection, strategy, and ball placement. The coach may also physically place the cue ball during ball-in-hand. The player is not obligated to follow the advice.
+- ILLEGAL COACHING: Any game strategy advice from anyone other than the designated coach, at any time outside of a called timeout, is a foul (ball-in-hand). This applies even between shots.
+- NOT ILLEGAL COACHING: General encouragement ("good try", "you can do it") and reminders ("mark your pocket", "chalk up") are allowed at any time.
+- EXCEPTIONS: No timeouts are allowed in Masters Division play.
+
+FORFEITS: A team must have at least 2 players present to avoid a forfeit. Individual matches may be forfeited if a player is not present when it is their turn to play.
+
+SCORESHEET: Captains are responsible for accurately recording innings, defensive shots, and timeouts on the official APA scoresheet. Errors can result in penalties.
+
+RESPONSE FORMAT — MULTIPLE SCENARIOS:
+When your answer covers multiple distinct scenarios or cases (e.g., "it depends on whether X or Y"), use this exact format so the app can display them as expandable cards:
+
+[SUMMARY]
+One or two sentences that directly answer the question at a high level.
+
+[SCENARIO: Short title for scenario 1]
+Full explanation of this specific case.
+
+[SCENARIO: Short title for scenario 2]
+Full explanation of this specific case.
+
+Use this format only when there are 2 or more meaningfully different scenarios. For simple single-answer questions, reply normally without any tags.`;
+
+// ─── Structured response parser ────────────────────────────────────────────────
+interface ParsedResponse {
+  summary: string;
+  scenarios: Array<{ title: string; body: string }>;
+}
+
+function parseStructuredResponse(content: string): ParsedResponse | null {
+  if (!content.includes('[SUMMARY]') || !content.includes('[SCENARIO:')) return null;
+  const summaryMatch = content.match(/\[SUMMARY\]\s*([\s\S]*?)(?=\[SCENARIO:)/);
+  const scenarioMatches = [...content.matchAll(/\[SCENARIO:\s*([^\]]+)\]\s*([\s\S]*?)(?=\[SCENARIO:|$)/g)];
+  if (!summaryMatch || scenarioMatches.length < 2) return null;
+  return {
+    summary: summaryMatch[1].trim(),
+    scenarios: scenarioMatches.map(m => ({ title: m[1].trim(), body: m[2].trim() })),
+  };
+}
 
 const makeProofPrompt = () =>
   `You are a precise APA rulebook citation tool. Given a question and answer, find the single most relevant verbatim sentence or passage from the rulebook below that best supports the answer.
@@ -136,8 +198,37 @@ Keep the quote to 1-3 sentences maximum. It must be word-for-word from the ruleb
 RULEBOOK:
 ${RULEBOOK_TEXT}`;
 
+const makeAreYouSurePrompt = () =>
+  `You are a strict APA rulebook auditor. A player has challenged an answer as potentially incorrect or misleading. Re-examine the answer critically against the verbatim rulebook below.
+
+Look for:
+- Outright errors
+- Oversimplifications that could mislead a player at the table
+- Missing nuance or important exceptions
+- Common misconceptions the answer may have reinforced
+
+Respond ONLY with valid JSON — no markdown fences, no extra text:
+{"verdict": "CONFIRMED", "summary": "...", "analysis": "...", "correction": null}
+
+The "verdict" field must be exactly one of: "CONFIRMED", "CORRECTED", or "NUANCE ADDED".
+The "correction" field must be the corrected answer written from scratch (if verdict is CORRECTED or NUANCE ADDED), or null (if CONFIRMED).
+The "analysis" field must be a full explanation — what was right, wrong, or missing. Cite rule numbers.
+
+RULEBOOK:
+${RULEBOOK_TEXT}`;
+
 // ─── Quick questions ───────────────────────────────────────────────────────────
-const QUICK_QUESTIONS = ['8-ball on break?', 'What is ball-in-hand?', 'All the fouls?', 'Frozen ball rules?', 'How to win 8-Ball?', 'Open table rules?'];
+const QUICK_QUESTIONS = [
+  '8-ball on break?',
+  'What is ball-in-hand?',
+  'All the fouls?',
+  'Frozen ball rules?',
+  'How to win 8-Ball?',
+  'Open table rules?',
+  'What is the 23-Rule?',
+  'Can I coach my teammate?',
+  'Timeout rules?',
+];
 const FULL_QUESTIONS = [
   'What happens if I pocket the 8-ball on the break?',
   'What is ball-in-hand and when do I get it?',
@@ -145,11 +236,16 @@ const FULL_QUESTIONS = [
   'How do frozen ball rules work?',
   'How do I legally win at 8-Ball?',
   'What is an open table in 8-Ball?',
+  'What is the 23-Rule and how does it work?',
+  'Can I coach my teammate during a match?',
+  'How do timeouts work in APA? Who can call one and how many do I get?',
 ];
 
 // ─── Types ─────────────────────────────────────────────────────────────────────
 type Message = { role: 'user' | 'assistant'; content: string };
 type Proof = { ruleNumber: string; ruleTitle: string; quote: string; visible: boolean };
+type AuditVerdict = 'CONFIRMED' | 'CORRECTED' | 'NUANCE ADDED' | 'ERROR';
+type AuditResult = { verdict: AuditVerdict; summary: string; analysis: string; correction: string | null; visible: boolean };
 
 // ─── Animated dot component ────────────────────────────────────────────────────
 function AnimatedDot({ delay }: { delay: number }) {
@@ -182,10 +278,15 @@ export default function RulesAssistant({ apiKey }: { apiKey: string }) {
   const [loading, setLoading] = useState(false);
   const [proofMap, setProofMap] = useState<Record<number, Proof>>({});
   const [proofLoading, setProofLoading] = useState<number | null>(null);
+  const [flagMap, setFlagMap] = useState<Record<number, AuditResult>>({});
+  const [flagLoading, setFlagLoading] = useState<number | null>(null);
+  const [systemPromptExtra, setSystemPromptExtra] = useState('');
+  const [expandedScenarios, setExpandedScenarios] = useState<Record<number, Set<number>>>({});
   const [listening, setListening] = useState(false);
   const pulseAnim = useRef(new Animated.Value(1)).current;
   const pulseLoop = useRef<Animated.CompositeAnimation | null>(null);
   const scrollRef = useRef<ScrollView>(null);
+  const messageYOffsets = useRef<number[]>([]);
   const inputRef = useRef<TextInput>(null);
   const fabLongPressed = useRef(false);
 
@@ -240,14 +341,39 @@ export default function RulesAssistant({ apiKey }: { apiKey: string }) {
   };
 
   useEffect(() => {
-    if (open) {
-      setTimeout(() => {
+    if (!open || messages.length === 0) return;
+    const last = messages[messages.length - 1];
+    setTimeout(() => {
+      if (last.role === 'assistant' && messages.length >= 2) {
+        // Scroll to the user's question (message before this response) so
+        // the start of the answer is visible at the top.
+        const userMsgY = messageYOffsets.current[messages.length - 2] ?? 0;
+        scrollRef.current?.scrollTo({ y: userMsgY, animated: true });
+      } else {
         scrollRef.current?.scrollToEnd({ animated: true });
-      }, 150);
-    }
+      }
+    }, 150);
   }, [open, messages]);
 
-  const callAPI = async (system: string, msgs: Message[]) => {
+  // Fetch approved prompt overrides from Supabase on first open
+  useEffect(() => {
+    if (!open) return;
+    supabase
+      .from('prompt_overrides')
+      .select('correction')
+      .eq('status', 'approved')
+      .then(({ data }) => {
+        if (data && data.length > 0) {
+          setSystemPromptExtra(
+            '\n\nAPPROVED RULE CORRECTIONS (from LO-verified audits — treat these as authoritative):\n' +
+            data.map((r: { correction: string }) => `- ${r.correction}`).join('\n')
+          );
+        }
+      });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
+
+  const callAPI = async (system: string, msgs: Message[], maxTokens = 800) => {
     const res = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: {
@@ -256,7 +382,7 @@ export default function RulesAssistant({ apiKey }: { apiKey: string }) {
         'anthropic-version': '2023-06-01',
         'anthropic-dangerous-direct-browser-access': 'true',
       },
-      body: JSON.stringify({ model: 'claude-opus-4-6', max_tokens: 800, system, messages: msgs }),
+      body: JSON.stringify({ model: 'claude-opus-4-6', max_tokens: maxTokens, system, messages: msgs }),
     });
     const data = await res.json();
     if (data.error) throw new Error(data.error.message);
@@ -271,7 +397,7 @@ export default function RulesAssistant({ apiKey }: { apiKey: string }) {
     setMessages(newMsgs);
     setLoading(true);
     try {
-      const reply = await callAPI(SYSTEM_PROMPT, newMsgs);
+      const reply = await callAPI(SYSTEM_PROMPT + systemPromptExtra, newMsgs);
       setMessages(prev => [...prev, { role: 'assistant', content: reply }]);
     } catch (err: any) {
       setMessages(prev => [...prev, { role: 'assistant', content: `⚠️ Error: ${err.message}` }]);
@@ -302,6 +428,74 @@ export default function RulesAssistant({ apiKey }: { apiKey: string }) {
       }));
     } finally {
       setProofLoading(null);
+    }
+  };
+
+  const areYouSure = async (msgIndex: number) => {
+    // Toggle visibility if audit already loaded
+    if (flagMap[msgIndex]) {
+      setFlagMap(prev => ({ ...prev, [msgIndex]: { ...prev[msgIndex], visible: !prev[msgIndex].visible } }));
+      return;
+    }
+
+    // Ensure proof citation is visible (don't toggle it off)
+    if (!proofMap[msgIndex]?.visible) {
+      showProof(msgIndex);
+    }
+
+    const question = messages[msgIndex - 1]?.content ?? '';
+    const answer = messages[msgIndex]?.content ?? '';
+    setFlagLoading(msgIndex);
+
+    try {
+      const raw = await callAPI(makeAreYouSurePrompt(), [{
+        role: 'user',
+        content: `Question: ${question}\n\nAnswer given: ${answer}\n\nAudit this answer against the rulebook.`,
+      }], 1500);
+      const result = JSON.parse(raw.replace(/```json|```/g, '').trim()) as Omit<AuditResult, 'visible'>;
+      setFlagMap(prev => ({ ...prev, [msgIndex]: { ...result, visible: true } }));
+
+      // Log flag to Supabase only when there's something for the LO to review
+      // (CONFIRMED answers are correct — no action needed, skip logging)
+      const { data: { user } } = await supabase.auth.getUser();
+      if (user?.id && result.verdict !== 'CONFIRMED') {
+        await supabase.from('rules_flags').insert({
+          user_id: user.id,
+          question,
+          original_answer: answer,
+          audit_verdict: result.verdict,
+          proposed_correction: result.correction ?? null,
+        });
+      }
+
+      // Inject correction into conversation so Claude carries it forward this session
+      if (result.verdict !== 'CONFIRMED' && result.correction) {
+        setMessages(prev => [
+          ...prev,
+          {
+            role: 'user',
+            content: `[SYSTEM CORRECTION] The previous answer to "${question}" was flagged as ${result.verdict}. The corrected interpretation is: ${result.correction} Please use this correction for all future answers this session.`,
+          },
+          {
+            role: 'assistant',
+            content: `✅ Correction acknowledged. ${result.correction}`,
+          },
+        ]);
+      }
+    } catch (err) {
+      console.error('[AreYouSure] audit failed:', err);
+      setFlagMap(prev => ({
+        ...prev,
+        [msgIndex]: {
+          verdict: 'ERROR',
+          summary: 'Audit failed.',
+          analysis: 'Could not complete the audit. Please try again.',
+          correction: null,
+          visible: true,
+        },
+      }));
+    } finally {
+      setFlagLoading(null);
     }
   };
 
@@ -379,44 +573,123 @@ export default function RulesAssistant({ apiKey }: { apiKey: string }) {
             ref={scrollRef}
             style={styles.messages}
             contentContainerStyle={styles.messagesContent}
-            onContentSizeChange={() => scrollRef.current?.scrollToEnd({ animated: true })}
           >
             {messages.map((msg, i) => (
-              <View key={i} style={styles.messageRow}>
+              <View
+                key={i}
+                style={styles.messageRow}
+                onLayout={(e) => { messageYOffsets.current[i] = e.nativeEvent.layout.y; }}
+              >
                 <View style={[styles.bubbleRow, msg.role === 'user' ? styles.bubbleRowUser : styles.bubbleRowAssistant]}>
                   <View style={styles.bubbleGroup}>
-                    <View style={[styles.bubble, msg.role === 'user' ? styles.bubbleUser : styles.bubbleAssistant]}>
-                      <Text style={[styles.bubbleText, msg.role === 'user' ? styles.bubbleTextUser : styles.bubbleTextAssistant]}>
-                        {msg.content}
-                      </Text>
-                    </View>
+                    {(() => {
+                      const parsed = msg.role === 'assistant' ? parseStructuredResponse(msg.content) : null;
+                      if (parsed) {
+                        const expanded = expandedScenarios[i] ?? new Set<number>();
+                        return (
+                          <View style={styles.bubbleAssistant}>
+                            <Text style={styles.bubbleTextAssistant}>{parsed.summary}</Text>
+                            <View style={styles.scenarioList}>
+                              {parsed.scenarios.map((s, si) => {
+                                const isOpen = expanded.has(si);
+                                return (
+                                  <View key={si} style={styles.scenarioCard}>
+                                    <Pressable
+                                      style={styles.scenarioHeader}
+                                      onPress={() => {
+                                        const next = new Set(expanded);
+                                        if (isOpen) next.delete(si); else next.add(si);
+                                        setExpandedScenarios(prev => ({ ...prev, [i]: next }));
+                                      }}
+                                    >
+                                      <Text style={styles.scenarioTitle}>{s.title}</Text>
+                                      <Text style={styles.scenarioChevron}>{isOpen ? '▲' : '▼'}</Text>
+                                    </Pressable>
+                                    {isOpen && (
+                                      <Text style={styles.scenarioBody}>{s.body}</Text>
+                                    )}
+                                  </View>
+                                );
+                              })}
+                            </View>
+                          </View>
+                        );
+                      }
+                      return (
+                        <View style={[styles.bubble, msg.role === 'user' ? styles.bubbleUser : styles.bubbleAssistant]}>
+                          <Text style={[styles.bubbleText, msg.role === 'user' ? styles.bubbleTextUser : styles.bubbleTextAssistant]}>
+                            {msg.content}
+                          </Text>
+                        </View>
+                      );
+                    })()}
 
-                    {/* Show Me the Proof — only for assistant replies after the first */}
+                    {/* Button row + callouts — only for assistant replies after the first */}
                     {msg.role === 'assistant' && i > 0 && (
                       <>
-                        <Pressable
-                          onPress={() => showProof(i)}
-                          disabled={proofLoading === i}
-                          style={({ pressed }) => [
-                            styles.proofBtn,
-                            proofMap[i]?.visible && styles.proofBtnActive,
-                            pressed && styles.proofBtnPressed,
-                          ]}
-                        >
-                          {proofLoading === i ? (
-                            <View style={styles.dotsRow}>
-                              <AnimatedDot delay={0} />
-                              <AnimatedDot delay={200} />
-                              <AnimatedDot delay={400} />
-                              <Text style={styles.proofBtnText}>  Finding proof...</Text>
-                            </View>
-                          ) : (
-                            <Text style={[styles.proofBtnText, proofMap[i]?.visible && styles.proofBtnTextActive]}>
-                              📖 {proofMap[i]?.visible ? 'Hide Proof' : 'Show Me the Proof'}
-                            </Text>
-                          )}
-                        </Pressable>
+                        {/* Button row */}
+                        <View style={styles.btnRow}>
+                          {/* Show Me the Proof */}
+                          <Pressable
+                            onPress={() => showProof(i)}
+                            disabled={proofLoading === i}
+                            style={({ pressed }) => [
+                              styles.proofBtn,
+                              proofMap[i]?.visible && styles.proofBtnActive,
+                              pressed && styles.proofBtnPressed,
+                            ]}
+                          >
+                            {proofLoading === i ? (
+                              <View style={styles.dotsRow}>
+                                <AnimatedDot delay={0} />
+                                <AnimatedDot delay={200} />
+                                <AnimatedDot delay={400} />
+                                <Text style={styles.proofBtnText}>  Finding proof...</Text>
+                              </View>
+                            ) : (
+                              <Text style={[styles.proofBtnText, proofMap[i]?.visible && styles.proofBtnTextActive]}>
+                                📖 {proofMap[i]?.visible ? 'Hide Proof' : 'Show Me the Proof'}
+                              </Text>
+                            )}
+                          </Pressable>
 
+                          {/* Are You Sure? */}
+                          <Pressable
+                            onPress={() => areYouSure(i)}
+                            disabled={flagLoading === i}
+                            style={({ pressed }) => [
+                              styles.auditBtn,
+                              flagMap[i]?.visible && (
+                                flagMap[i].verdict === 'CONFIRMED' ? styles.auditBtnConfirmed :
+                                flagMap[i].verdict === 'NUANCE ADDED' ? styles.auditBtnNuance :
+                                styles.auditBtnCorrected
+                              ),
+                              pressed && styles.auditBtnPressed,
+                            ]}
+                          >
+                            {flagLoading === i ? (
+                              <View style={styles.dotsRow}>
+                                <AnimatedDot delay={0} />
+                                <AnimatedDot delay={200} />
+                                <AnimatedDot delay={400} />
+                                <Text style={styles.auditBtnText}>  Checking...</Text>
+                              </View>
+                            ) : (
+                              <Text style={[
+                                styles.auditBtnText,
+                                flagMap[i]?.visible && (
+                                  flagMap[i].verdict === 'CONFIRMED' ? styles.auditBtnTextConfirmed :
+                                  flagMap[i].verdict === 'NUANCE ADDED' ? styles.auditBtnTextNuance :
+                                  styles.auditBtnTextCorrected
+                                ),
+                              ]}>
+                                🤔 {flagMap[i]?.visible ? 'Hide Audit' : 'Are You Sure?'}
+                              </Text>
+                            )}
+                          </Pressable>
+                        </View>
+
+                        {/* Proof citation card */}
                         {proofMap[i]?.visible && (
                           <View style={styles.proofCard}>
                             <Text style={styles.proofCardTitle}>
@@ -424,6 +697,36 @@ export default function RulesAssistant({ apiKey }: { apiKey: string }) {
                             </Text>
                             <Text style={styles.proofCardQuote}>"{proofMap[i].quote}"</Text>
                             <Text style={styles.proofCardFooter}>APA Official Game Rules Booklet © 2023</Text>
+                          </View>
+                        )}
+
+                        {/* Audit result card */}
+                        {flagMap[i]?.visible && (
+                          <View style={[
+                            styles.auditCard,
+                            flagMap[i].verdict === 'CONFIRMED' ? styles.auditCardConfirmed :
+                            flagMap[i].verdict === 'NUANCE ADDED' ? styles.auditCardNuance :
+                            styles.auditCardCorrected,
+                          ]}>
+                            <Text style={[
+                              styles.auditCardTitle,
+                              flagMap[i].verdict === 'CONFIRMED' ? styles.auditCardTitleConfirmed :
+                              flagMap[i].verdict === 'NUANCE ADDED' ? styles.auditCardTitleNuance :
+                              styles.auditCardTitleCorrected,
+                            ]}>
+                              {flagMap[i].verdict === 'CONFIRMED' ? '✅ CONFIRMED' :
+                               flagMap[i].verdict === 'CORRECTED' ? '❌ CORRECTED' :
+                               flagMap[i].verdict === 'ERROR' ? '⚠️ ERROR' :
+                               '⚠️ NUANCE ADDED'} — {flagMap[i].summary}
+                            </Text>
+                            <Text style={styles.auditCardAnalysis}>{flagMap[i].analysis}</Text>
+                            {flagMap[i].correction && (
+                              <View style={styles.auditCardCorrection}>
+                                <Text style={styles.auditCardCorrectionLabel}>CORRECTED ANSWER:</Text>
+                                <Text style={styles.auditCardCorrectionText}>{flagMap[i].correction}</Text>
+                              </View>
+                            )}
+                            <Text style={styles.auditCardFooter}>APA Rules Audit • 2023 Official Rulebook</Text>
                           </View>
                         )}
                       </>
@@ -625,10 +928,50 @@ const styles = StyleSheet.create({
     borderTopLeftRadius: 3,
     backgroundColor: C.surface,
     borderColor: C.border,
+    borderWidth: 1,
+    borderRadius: 16,
+    padding: 14,
+    maxWidth: '88%',
   },
   bubbleText: { fontSize: 13, lineHeight: 20 },
   bubbleTextUser: { color: C.userText },
-  bubbleTextAssistant: { color: C.assistantText },
+  bubbleTextAssistant: { color: C.assistantText, fontSize: 13, lineHeight: 20 },
+
+  // Scenario accordion
+  scenarioList: { marginTop: 10, gap: 6 },
+  scenarioCard: {
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: C.borderWarm,
+    overflow: 'hidden',
+  },
+  scenarioHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    backgroundColor: C.surfaceAlt,
+  },
+  scenarioTitle: {
+    flex: 1,
+    fontSize: 13,
+    fontWeight: '600',
+    color: C.gold,
+  },
+  scenarioChevron: {
+    fontSize: 10,
+    color: C.brownDim,
+    marginLeft: 6,
+  },
+  scenarioBody: {
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    fontSize: 13,
+    lineHeight: 20,
+    color: C.assistantText,
+    backgroundColor: C.bgDark,
+  },
 
   // Proof button
   proofBtn: {
@@ -791,4 +1134,80 @@ const styles = StyleSheet.create({
     color: C.brownDim,
     letterSpacing: 0.3,
   },
+
+  // Button row (proof + audit side by side)
+  btnRow: {
+    flexDirection: 'row',
+    gap: 6,
+    flexWrap: 'wrap',
+  },
+
+  // Are You Sure button
+  auditBtn: {
+    alignSelf: 'flex-start',
+    borderWidth: 1,
+    borderColor: '#444',
+    borderRadius: 10,
+    paddingHorizontal: 11,
+    paddingVertical: 5,
+    backgroundColor: 'rgba(80,80,80,0.12)',
+  },
+  auditBtnConfirmed: {
+    borderColor: '#4a9a4a',
+    backgroundColor: 'rgba(50,180,50,0.12)',
+  },
+  auditBtnNuance: {
+    borderColor: C.gold,
+    backgroundColor: 'rgba(212,175,55,0.12)',
+  },
+  auditBtnCorrected: {
+    borderColor: '#cc4444',
+    backgroundColor: 'rgba(200,60,60,0.12)',
+  },
+  auditBtnPressed: { backgroundColor: 'rgba(200,60,60,0.22)' },
+  auditBtnText: { fontSize: 11, color: '#888' },
+  auditBtnTextConfirmed: { color: '#6abf6a' },
+  auditBtnTextNuance: { color: C.gold },
+  auditBtnTextCorrected: { color: '#e07070' },
+
+  // Audit result card
+  auditCard: {
+    borderRadius: 10,
+    borderWidth: 1,
+    borderLeftWidth: 3,
+    padding: 12,
+    gap: 6,
+  },
+  auditCardConfirmed: {
+    backgroundColor: '#0d1a0d',
+    borderColor: '#2a4a2a',
+    borderLeftColor: '#4a9a4a',
+  },
+  auditCardNuance: {
+    backgroundColor: '#1a1500',
+    borderColor: '#4a4020',
+    borderLeftColor: C.gold,
+  },
+  auditCardCorrected: {
+    backgroundColor: '#1a0d0d',
+    borderColor: '#4a2020',
+    borderLeftColor: '#cc4444',
+  },
+  auditCardTitle: { fontSize: 10, letterSpacing: 0.8, fontWeight: 'bold' },
+  auditCardTitleConfirmed: { color: '#4a9a4a' },
+  auditCardTitleNuance: { color: C.gold },
+  auditCardTitleCorrected: { color: '#cc4444' },
+  auditCardAnalysis: { fontSize: 12, color: '#c8b8b0', lineHeight: 19 },
+  auditCardCorrection: {
+    marginTop: 4,
+    padding: 8,
+    backgroundColor: 'rgba(255,255,255,0.04)',
+    borderRadius: 8,
+    borderLeftWidth: 2,
+    borderLeftColor: '#cc4444',
+    gap: 4,
+  },
+  auditCardCorrectionLabel: { fontSize: 10, color: '#cc4444', fontWeight: 'bold', letterSpacing: 0.6 },
+  auditCardCorrectionText: { fontSize: 12, color: '#e8d8c8', lineHeight: 19 },
+  auditCardFooter: { fontSize: 10, color: '#6a4a4a' },
 });

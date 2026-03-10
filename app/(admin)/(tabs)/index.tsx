@@ -45,6 +45,7 @@ export default function AdminDashboard() {
     completed: 0,
     finalized: 0,
     disputed: 0,
+    flaggedRules: 0,
   });
 
   useFocusEffect(
@@ -63,7 +64,7 @@ export default function AdminDashboard() {
 
           const leagueId = league?.id;
 
-          const [divisions, scheduled, active, completed, finalized, disputed] =
+          const [divisions, scheduled, active, completed, finalized, disputed, flaggedRules] =
             await Promise.all([
               leagueId
                 ? supabase
@@ -91,6 +92,10 @@ export default function AdminDashboard() {
                 .from('team_matches')
                 .select('id', { count: 'exact', head: true })
                 .eq('status', 'disputed'),
+              supabase
+                .from('rules_flags')
+                .select('id', { count: 'exact', head: true })
+                .eq('status', 'pending'),
             ]);
 
           if (!cancelled) {
@@ -102,6 +107,7 @@ export default function AdminDashboard() {
               completed: completed.count ?? 0,
               finalized: finalized.count ?? 0,
               disputed: disputed.count ?? 0,
+              flaggedRules: flaggedRules.count ?? 0,
             });
           }
         } catch (err) {
@@ -167,11 +173,18 @@ export default function AdminDashboard() {
             onPress={() => router.push('/(admin)/(tabs)/matches?filter=finalized')}
           />
           <SummaryCard
-            title="Disputed"
+            title="Disputes"
             value={loading ? '—' : counts.disputed}
             icon="alert-circle-outline"
             color="#F44336"
             onPress={() => router.push('/(admin)/(tabs)/matches?filter=disputed')}
+          />
+          <SummaryCard
+            title="Rules Flags"
+            value={loading ? '—' : counts.flaggedRules}
+            icon="flag-outline"
+            color="#D4AF37"
+            onPress={() => router.push('/(admin)/rules-flags')}
           />
         </View>
       </ScrollView>

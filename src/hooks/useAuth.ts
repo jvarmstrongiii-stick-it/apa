@@ -8,6 +8,7 @@ interface AuthState {
   user: User | null;
   profile: Profile | null;
   role: UserRole | null;
+  isCaptain: boolean;
   isLoading: boolean;
   isAuthenticated: boolean;
 }
@@ -17,9 +18,22 @@ const initialState: AuthState = {
   user: null,
   profile: null,
   role: null,
+  isCaptain: false,
   isLoading: true,
   isAuthenticated: false,
 };
+
+async function fetchIsCaptain(teamId: string | null, playerId: string | null): Promise<boolean> {
+  if (!teamId || !playerId) return false;
+  const { data } = await supabase
+    .from('team_players')
+    .select('is_captain')
+    .eq('team_id', teamId)
+    .eq('player_id', playerId)
+    .is('left_at', null)
+    .maybeSingle();
+  return data?.is_captain ?? false;
+}
 
 /**
  * Core authentication hook.
@@ -95,6 +109,11 @@ export function useAuth() {
           ? await fetchProfile(session.user.id)
           : null;
 
+        const captain = await fetchIsCaptain(
+          profile?.team_id ?? null,
+          (profile as any)?.player_id ?? null,
+        );
+
         if (!isMounted) return;
 
         setState({
@@ -102,6 +121,7 @@ export function useAuth() {
           user: session.user,
           profile,
           role: profile?.role ?? null,
+          isCaptain: captain,
           isLoading: false,
           isAuthenticated: true,
         });
@@ -152,6 +172,7 @@ export function useAuth() {
         user,
         profile,
         role: profile.role,
+        isCaptain: false,  // admins/LOs are never captains
         isLoading: false,
         isAuthenticated: true,
       });
@@ -202,6 +223,7 @@ export function useAuth() {
         user,
         profile,
         role: profile?.role ?? null,
+        isCaptain: false,  // captain status is set after set_player_identity; use refreshProfile
         isLoading: false,
         isAuthenticated: true,
       });
@@ -212,14 +234,18 @@ export function useAuth() {
   );
 
   // ------------------------------------------------------------------
-  // Refresh profile (call after mutating the profile row, e.g. team selection)
+  // Refresh profile (call after mutating the profile row, e.g. after set_player_identity)
   // ------------------------------------------------------------------
 
   const refreshProfile = useCallback(async () => {
     const userId = state.user?.id;
     if (!userId) return;
     const profile = await fetchProfile(userId);
-    setState((prev) => ({ ...prev, profile, role: profile?.role ?? null }));
+    const captain = await fetchIsCaptain(
+      profile?.team_id ?? null,
+      (profile as any)?.player_id ?? null,
+    );
+    setState((prev) => ({ ...prev, profile, role: profile?.role ?? null, isCaptain: captain }));
   }, [state.user?.id, fetchProfile]);
 
   // ------------------------------------------------------------------
@@ -247,6 +273,7 @@ export function useAuth() {
     user: state.user,
     profile: state.profile,
     role: state.role,
+    isCaptain: state.isCaptain,
     isLoading: state.isLoading,
     isAuthenticated: state.isAuthenticated,
     signInAdmin,
