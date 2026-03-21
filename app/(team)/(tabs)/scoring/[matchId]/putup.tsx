@@ -151,26 +151,26 @@ export default function PutUpScreen() {
         return;
       }
 
-      // Fetch player name + SL (now readable via players_select_opponent policy)
+      // Fetch player name from players table + SL + MP from team_players
       const { data: p } = await supabase
         .from('players')
-        .select('first_name, last_name, skill_level')
+        .select('first_name, last_name')
         .eq('id', opponentPlayerId)
         .single();
 
       if (!p) return;
 
-      // Fetch MP from opponent's team_players (readable via team_players_select_opponent)
+      // Fetch MP and SL from opponent's team_players (readable via team_players_select_opponent)
       const { data: tp } = await supabase
         .from('team_players')
-        .select('matches_played')
+        .select('matches_played, current_8_ball_sl, current_9_ball_sl')
         .eq('player_id', opponentPlayerId)
         .eq('team_id', oppTeamId)
         .maybeSingle();
 
       setOpponentPlayer({
         name: `${(p as any).first_name ?? ''} ${(p as any).last_name ?? ''}`.trim(),
-        skill_level: (p as any).skill_level ?? 0,
+        skill_level: (tp as any)?.current_8_ball_sl ?? (tp as any)?.current_9_ball_sl ?? 0,
         matches_played: (tp as any)?.matches_played ?? 0,
       });
     },
@@ -186,7 +186,7 @@ export default function PutUpScreen() {
       const { data: tm } = await supabase
         .from('team_matches')
         .select(
-          'home_team_id, away_team_id, status, division:divisions!division_id(league:leagues!league_id(game_format))'
+          'home_team_id, away_team_id, status, game_format'
         )
         .eq('id', matchId)
         .single();
@@ -196,17 +196,17 @@ export default function PutUpScreen() {
       const side: Side = (tm as any).home_team_id === teamId ? 'home' : 'away';
       const oppTeamId: string =
         side === 'home' ? (tm as any).away_team_id : (tm as any).home_team_id;
-      const gameFormat = (tm as any).division?.league?.game_format ?? 'eight_ball';
+      const gameFormat = (tm as any).game_format;
       const tmStatus: string = (tm as any).status ?? 'scheduled';
 
       setOurSide(side);
       setOpponentTeamId(oppTeamId);
 
-      // Fetch our roster (with matches_played)
+      // Fetch our roster (with matches_played and SL)
       const { data: rosterData } = await supabase
         .from('team_players')
         .select(
-          'matches_played, player:players!player_id(id, first_name, last_name, skill_level)'
+          'matches_played, current_8_ball_sl, current_9_ball_sl, player:players!player_id(id, first_name, last_name)'
         )
         .eq('team_id', teamId)
         .eq('is_active', true);
@@ -216,7 +216,7 @@ export default function PutUpScreen() {
           .map((tp: any) => ({
             id: tp.player?.id ?? '',
             name: `${tp.player?.first_name ?? ''} ${tp.player?.last_name ?? ''}`.trim(),
-            skill_level: tp.player?.skill_level ?? 0,
+            skill_level: tp.current_8_ball_sl ?? tp.current_9_ball_sl ?? 0,
             matches_played: tp.matches_played ?? 0,
           }))
           .filter((p: RosterPlayer) => p.id);
@@ -228,7 +228,7 @@ export default function PutUpScreen() {
       const { data: oppRosterData } = await supabase
         .from('team_players')
         .select(
-          'matches_played, player:players!player_id(id, first_name, last_name, skill_level)'
+          'matches_played, current_8_ball_sl, current_9_ball_sl, player:players!player_id(id, first_name, last_name)'
         )
         .eq('team_id', oppTeamId)
         .eq('is_active', true);
@@ -255,13 +255,10 @@ export default function PutUpScreen() {
           .select('id, home_player_id, away_player_id, put_up_team')
           .maybeSingle();
         im = created;
-      } else if (
-        tmStatus === 'scheduled' &&
-        im.home_player_id &&
-        im.away_player_id
-      ) {
+      } else if (im.home_player_id && im.away_player_id) {
         // Stale player IDs from a previous aborted session — clear them so the
-        // put-up flow runs fresh. Only safe when the match hasn't started yet.
+        // put-up flow runs fresh. If both are set on entry to putup, it's always
+        // stale: legitimate completion would have auto-navigated away already.
         await supabase
           .from('individual_matches')
           .update({ home_player_id: null, away_player_id: null, home_skill_level: null, away_skill_level: null })

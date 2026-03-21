@@ -557,35 +557,35 @@ export type Database = {
       players: {
         Row: {
           created_at: string
+          current_8_ball_sl: number | null
+          current_9_ball_sl: number | null
           first_name: string
-          game_format: Database["public"]["Enums"]["game_format"]
           id: string
           is_active: boolean
           last_name: string
           member_number: string
-          skill_level: number
           updated_at: string
         }
         Insert: {
           created_at?: string
+          current_8_ball_sl?: number | null
+          current_9_ball_sl?: number | null
           first_name: string
-          game_format?: Database["public"]["Enums"]["game_format"]
           id?: string
           is_active?: boolean
           last_name: string
           member_number: string
-          skill_level?: number
           updated_at?: string
         }
         Update: {
           created_at?: string
+          current_8_ball_sl?: number | null
+          current_9_ball_sl?: number | null
           first_name?: string
-          game_format?: Database["public"]["Enums"]["game_format"]
           id?: string
           is_active?: boolean
           last_name?: string
           member_number?: string
-          skill_level?: number
           updated_at?: string
         }
         Relationships: []
@@ -831,6 +831,7 @@ export type Database = {
           division_id: string
           finalized_at: string | null
           finalized_by: string | null
+          game_format: Database["public"]["Enums"]["game_format"]
           home_score: number
           home_team_id: string
           id: string
@@ -849,6 +850,7 @@ export type Database = {
           division_id: string
           finalized_at?: string | null
           finalized_by?: string | null
+          game_format: Database["public"]["Enums"]["game_format"]
           home_score?: number
           home_team_id: string
           id?: string
@@ -867,6 +869,7 @@ export type Database = {
           division_id?: string
           finalized_at?: string | null
           finalized_by?: string | null
+          game_format?: Database["public"]["Enums"]["game_format"]
           home_score?: number
           home_team_id?: string
           id?: string
@@ -925,6 +928,8 @@ export type Database = {
       }
       team_players: {
         Row: {
+          current_8_ball_sl: number | null
+          current_9_ball_sl: number | null
           id: string
           is_active: boolean
           is_captain: boolean
@@ -932,10 +937,11 @@ export type Database = {
           left_at: string | null
           matches_played: number
           player_id: string
-          skill_level: number
           team_id: string
         }
         Insert: {
+          current_8_ball_sl?: number | null
+          current_9_ball_sl?: number | null
           id?: string
           is_active?: boolean
           is_captain?: boolean
@@ -943,10 +949,11 @@ export type Database = {
           left_at?: string | null
           matches_played?: number
           player_id: string
-          skill_level?: number
           team_id: string
         }
         Update: {
+          current_8_ball_sl?: number | null
+          current_9_ball_sl?: number | null
           id?: string
           is_active?: boolean
           is_captain?: boolean
@@ -954,7 +961,6 @@ export type Database = {
           left_at?: string | null
           matches_played?: number
           player_id?: string
-          skill_level?: number
           team_id?: string
         }
         Relationships: [

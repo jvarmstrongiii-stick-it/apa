@@ -1,5 +1,5 @@
 # Pool League Scoring App — Working Specification
-**Living Document | Updated 2026-03-20**
+**Living Document | Updated 2026-03-21**
 
 ---
 
@@ -148,11 +148,11 @@ After step 3, login always routes to the **Team Dashboard** (`/`). Match navigat
 | first_name | text | |
 | last_name | text | |
 | member_number | text UNIQUE | APA member ID — believed to be 8 digits with 3-digit area prefix (e.g. 189-XXXXX); stored as-is from scoresheet; 5-digit input used in Add Player UI for now |
-| skill_level | integer | 1–9, DEFAULT 5; kept for backward compat (scoring screens read this) |
-| eight_ball_sl | integer | 1–9, nullable — APA 8-ball skill level; populated from PDF import and Add Player |
-| nine_ball_sl | integer | 1–9, nullable — APA 9-ball skill level; populated from PDF import and Add Player |
-| game_format | game_format | |
+| current_8_ball_sl | integer | 1–9, nullable — APA 8-ball skill level; populated from PDF import and Add Player |
+| current_9_ball_sl | integer | 1–9, nullable — APA 9-ball skill level; populated from PDF import and Add Player |
 | is_active | boolean | DEFAULT true |
+
+One row per player regardless of how many formats they play. `current_8_ball_sl` and/or `current_9_ball_sl` are null when the player has no history in that format.
 
 ### team_players (roster junction)
 | Column | Type | Notes |
@@ -160,12 +160,15 @@ After step 3, login always routes to the **Team Dashboard** (`/`). Match navigat
 | id | uuid PK | |
 | team_id | uuid | FK → teams |
 | player_id | uuid | FK → players |
-| skill_level | integer | DEFAULT 3 (new/unknown players start at SL 3 per APA); updated on PDF import |
+| current_8_ball_sl | integer | 1–9, nullable — operational SL for this team/season in 8-ball; written on PDF import |
+| current_9_ball_sl | integer | 1–9, nullable — operational SL for this team/season in 9-ball; written on PDF import |
 | is_active | boolean | DEFAULT true |
 | is_captain | boolean | DEFAULT false; set `true` for first player per team on each PDF import (authoritative — resets on re-import); captains can also promote co-captains manually via roster edit |
 | matches_played | integer | DEFAULT 0; updated on each PDF import |
 | joined_at | timestamptz | |
 | left_at | timestamptz | Soft-delete: set when player is removed from roster via captain edit |
+
+**SL resolution:** wherever a single SL value is needed (RACE table, display badge), use `current_8_ball_sl ?? current_9_ball_sl ?? 3`.
 
 **Captain detection:** The first player listed for each team on the APA scoresheet (`homePlayers[0]` / `awayPlayers[0]`) is the captain. `is_captain = true` is written for that player on every import; all other players get `is_captain = false`. Manually-promoted co-captains are reset by the next import — re-promote after each re-import if needed.
 
@@ -178,7 +181,10 @@ After step 3, login always routes to the **Team Dashboard** (`/`). Match navigat
 | player_id | uuid | FK → players |
 | league_id | uuid | FK → leagues |
 | old_level / new_level | integer | |
+| game_format | game_format | NOT NULL — which format this SL change applies to |
 | effective_date | date | |
+
+Written by PDF import whenever a player's SL changes or they are first seen. `old_level = new_level` on first import.
 
 ### team_matches
 | Column | Type | Notes |
@@ -189,6 +195,7 @@ After step 3, login always routes to the **Team Dashboard** (`/`). Match navigat
 | away_team_id | uuid | FK → teams |
 | match_date | date | |
 | week_number | integer | |
+| game_format | game_format | NOT NULL — denormalized from `leagues.game_format` at import time; used by all scoring screens instead of joining through division → league |
 | status | match_status | DEFAULT 'scheduled'; `imported` = parsed but not yet promoted by admin |
 | import_id | uuid | FK → imports ON DELETE SET NULL; cascades to delete unscheduled matches when import is deleted |
 | home_score / away_score | integer | Team-level APA points |

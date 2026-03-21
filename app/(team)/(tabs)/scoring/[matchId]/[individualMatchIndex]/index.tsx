@@ -54,6 +54,7 @@ interface GameOverOption {
 
 interface Snapshot {
   currentShooterIsBreaker: boolean;
+  breakerStillAtTable: boolean;
   isBreakTurn: boolean;
   rackInnings: number;
   totalInnings: number;
@@ -71,6 +72,10 @@ interface Snapshot {
   eightOnBreakHome: boolean;
   eightOnBreakAway: boolean;
   shooterName: string;
+  racksWonHome: number;
+  racksWonAway: number;
+  rackNumber: number;
+  breakPlayer: Side | null;
 }
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -176,9 +181,18 @@ export default function IndividualMatchScoringScreen() {
   const [breakPlayer, setBreakPlayer] = useState<Side | null>(null); // null = lag not done yet
   const [isBreakTurn, setIsBreakTurn] = useState(true);   // breaker's first turn of this rack
   const [currentShooterIsBreaker, setCurrentShooterIsBreaker] = useState(true);
+  // true from rack start until the breaker ends their turn for the first time;
+  // once false, "Break and Run" is no longer an option even if breaker returns to the table
+  const [breakerStillAtTable, setBreakerStillAtTable] = useState(true);
   const [rackInnings, setRackInnings] = useState(0);
   const [timeoutsHome, setTimeoutsHome] = useState(2);
   const [timeoutsAway, setTimeoutsAway] = useState(2);
+  // Running totals: accumulated timeouts used across all completed racks
+  const [totalTimeoutsHome, setTotalTimeoutsHome] = useState(0);
+  const [totalTimeoutsAway, setTotalTimeoutsAway] = useState(0);
+
+  // Lag winner — set once at the start of this individual match (null = lag not yet recorded)
+  const [lagWinner, setLagWinner] = useState<Side | null>(null);
 
   // ── Innings verification ──────────────────────────────────────────────────────
   //  After a rack ends the scorer reviews the inning count and adjusts if needed.
@@ -231,7 +245,7 @@ export default function IndividualMatchScoringScreen() {
   const gameOverOptions: GameOverOption[] =
     isBreakTurn
       ? GAME_OVER_BREAK
-      : currentShooterIsBreaker && gameFormat === '8-ball' && totalInnings === 0
+      : currentShooterIsBreaker && gameFormat === '8-ball' && breakerStillAtTable
         ? GAME_OVER_BREAKER_RUN
         : gameFormat === '8-ball'
           ? GAME_OVER_NORMAL_8
@@ -270,13 +284,12 @@ export default function IndividualMatchScoringScreen() {
       try {
         const { data: tm } = await supabase
           .from('team_matches')
-          .select('home_team_id, away_team_id, division:divisions!division_id(league:leagues!league_id(game_format, scorekeeper_count))')
+          .select('home_team_id, away_team_id, game_format, division:divisions!division_id(league:leagues!league_id(scorekeeper_count))')
           .eq('id', matchId)
           .single();
 
-        const league = (tm?.division as any)?.league;
-        const fmt: GameFormat = league?.game_format === 'nine_ball' ? '9-ball' : '8-ball';
-        const skCount = (league?.scorekeeper_count ?? 1) as 1 | 2;
+        const fmt: GameFormat = (tm as any)?.game_format === 'nine_ball' ? '9-ball' : '8-ball';
+        const skCount = ((tm?.division as any)?.league?.scorekeeper_count ?? 1) as 1 | 2;
         if (teamId) {
           setOurSide((tm as any)?.home_team_id === teamId ? 'home' : 'away');
         }
@@ -285,8 +298,9 @@ export default function IndividualMatchScoringScreen() {
           .from('individual_matches')
           .select([
             'id',
-            'home_player:players!home_player_id(first_name, last_name, skill_level)',
-            'away_player:players!away_player_id(first_name, last_name, skill_level)',
+            'lag_winner',
+            'home_player:players!home_player_id(first_name, last_name, current_8_ball_sl, current_9_ball_sl)',
+            'away_player:players!away_player_id(first_name, last_name, current_8_ball_sl, current_9_ball_sl)',
           ].join(', '))
           .eq('team_match_id', matchId)
           .eq('match_order', matchIndex + 1)
@@ -294,8 +308,8 @@ export default function IndividualMatchScoringScreen() {
 
         if (ims && ims.length > 0) {
           const im = ims[0] as any;
-          const hsl: number = im.home_player?.skill_level ?? 3;
-          const asl: number = im.away_player?.skill_level ?? 3;
+          const hsl: number = im.home_player?.current_8_ball_sl ?? im.home_player?.current_9_ball_sl ?? 3;
+          const asl: number = im.away_player?.current_8_ball_sl ?? im.away_player?.current_9_ball_sl ?? 3;
           const [rh, ra] = getRace(hsl, asl);
           const homeName =
             `${im.home_player?.first_name ?? ''} ${im.home_player?.last_name ?? ''}`.trim() || 'Home Player';
@@ -315,6 +329,9 @@ export default function IndividualMatchScoringScreen() {
 
           applyMatchData(matchDataCache);
 
+          // Restore lag winner from DB (if already set for a resumed match)
+          if (im.lag_winner) setLagWinner(im.lag_winner as Side);
+
           // Restore mid-match state if the scorer left and came back
           const savedRaw = await SecureStore.getItemAsync(`scoring-state-${im.id}`);
           if (savedRaw) {
@@ -333,9 +350,12 @@ export default function IndividualMatchScoringScreen() {
               setBreakPlayer(s.breakPlayer ?? null);
               setIsBreakTurn(s.isBreakTurn ?? true);
               setCurrentShooterIsBreaker(s.currentShooterIsBreaker ?? true);
+              setBreakerStillAtTable(s.breakerStillAtTable ?? true);
               setRackInnings(s.rackInnings ?? 0);
               setTimeoutsHome(s.timeoutsHome ?? timeoutsForSL(hsl));
               setTimeoutsAway(s.timeoutsAway ?? timeoutsForSL(asl));
+              setTotalTimeoutsHome(s.totalTimeoutsHome ?? 0);
+              setTotalTimeoutsAway(s.totalTimeoutsAway ?? 0);
               setActionPhase(s.actionPhase ?? 'turn');
               setPendingRackWinner(s.pendingRackWinner ?? null);
               setVerifyMyInnings(s.verifyMyInnings ?? 0);
@@ -369,9 +389,12 @@ export default function IndividualMatchScoringScreen() {
               setBreakPlayer(s.breakPlayer ?? null);
               setIsBreakTurn(s.isBreakTurn ?? true);
               setCurrentShooterIsBreaker(s.currentShooterIsBreaker ?? true);
+              setBreakerStillAtTable(s.breakerStillAtTable ?? true);
               setRackInnings(s.rackInnings ?? 0);
               setTimeoutsHome(s.timeoutsHome ?? timeoutsForSL(cached.homeSL));
               setTimeoutsAway(s.timeoutsAway ?? timeoutsForSL(cached.awaySL));
+              setTotalTimeoutsHome(s.totalTimeoutsHome ?? 0);
+              setTotalTimeoutsAway(s.totalTimeoutsAway ?? 0);
               setActionPhase(s.actionPhase ?? 'turn');
               setPendingRackWinner(s.pendingRackWinner ?? null);
               setVerifyMyInnings(s.verifyMyInnings ?? 0);
@@ -416,8 +439,9 @@ export default function IndividualMatchScoringScreen() {
       breakAndRunHome, breakAndRunAway,
       eightOnBreakHome, eightOnBreakAway,
       rackNumber, breakPlayer,
-      isBreakTurn, currentShooterIsBreaker,
+      isBreakTurn, currentShooterIsBreaker, breakerStillAtTable,
       rackInnings, timeoutsHome, timeoutsAway,
+      totalTimeoutsHome, totalTimeoutsAway,
       actionPhase, pendingRackWinner,
       verifyMyInnings,
     };
@@ -432,8 +456,9 @@ export default function IndividualMatchScoringScreen() {
     breakAndRunHome, breakAndRunAway,
     eightOnBreakHome, eightOnBreakAway,
     rackNumber, breakPlayer,
-    isBreakTurn, currentShooterIsBreaker,
+    isBreakTurn, currentShooterIsBreaker, breakerStillAtTable,
     rackInnings, timeoutsHome, timeoutsAway,
+    totalTimeoutsHome, totalTimeoutsAway,
     actionPhase, pendingRackWinner,
     verifyMyInnings,
   ]);
@@ -469,6 +494,7 @@ export default function IndividualMatchScoringScreen() {
   function saveSnapshot() {
     setLastSnapshot({
       currentShooterIsBreaker,
+      breakerStillAtTable,
       isBreakTurn,
       rackInnings,
       totalInnings,
@@ -486,6 +512,10 @@ export default function IndividualMatchScoringScreen() {
       eightOnBreakHome,
       eightOnBreakAway,
       shooterName: currentPlayer.name,
+      racksWonHome,
+      racksWonAway,
+      rackNumber,
+      breakPlayer,
     });
   }
 
@@ -493,6 +523,7 @@ export default function IndividualMatchScoringScreen() {
     if (!lastSnapshot) return;
     const s = lastSnapshot;
     setCurrentShooterIsBreaker(s.currentShooterIsBreaker);
+    setBreakerStillAtTable(s.breakerStillAtTable);
     setIsBreakTurn(s.isBreakTurn);
     setRackInnings(s.rackInnings);
     setTotalInnings(s.totalInnings);
@@ -509,6 +540,10 @@ export default function IndividualMatchScoringScreen() {
     setBreakAndRunAway(s.breakAndRunAway);
     setEightOnBreakHome(s.eightOnBreakHome);
     setEightOnBreakAway(s.eightOnBreakAway);
+    setRacksWonHome(s.racksWonHome);
+    setRacksWonAway(s.racksWonAway);
+    setRackNumber(s.rackNumber);
+    setBreakPlayer(s.breakPlayer);
     if (!s.timeoutActive && !s.timeoutExpired) stopTimeoutFlash();
     setLastSnapshot(null);
     resetInactivity();
@@ -516,10 +551,21 @@ export default function IndividualMatchScoringScreen() {
 
   // ─── Rack helpers ────────────────────────────────────────────────────────────
 
+  // ─── Lag selection ───────────────────────────────────────────────────────────
+
+  async function handleLagSelected(winner: Side) {
+    setLagWinner(winner);
+    if (individualMatchId) {
+      supabase.from('individual_matches').update({ lag_winner: winner }).eq('id', individualMatchId);
+    }
+    initRack(winner);
+  }
+
   function initRack(breaker: Side) {
     setBreakPlayer(breaker);
     setIsBreakTurn(true);
     setCurrentShooterIsBreaker(true);
+    setBreakerStillAtTable(true);
     setRackInnings(0);
     setTimeoutsHome(timeoutsForSL(homePlayer.skill_level));
     setTimeoutsAway(timeoutsForSL(awayPlayer.skill_level));
@@ -543,6 +589,8 @@ export default function IndividualMatchScoringScreen() {
       setTotalInnings(t => t + 1);
     }
     if (isBreakTurn) setIsBreakTurn(false);
+    // Breaker is leaving the table — Break and Run no longer possible this rack
+    if (currentShooterIsBreaker) setBreakerStillAtTable(false);
     setCurrentShooterIsBreaker(v => !v);
     setActionPhase('turn');
     setTimeoutActive(false);
@@ -655,8 +703,18 @@ export default function IndividualMatchScoringScreen() {
     setPendingRackWinner(null);
 
     if (newHome >= homePlayer.race_to || newAway >= awayPlayer.race_to) {
-      saveAndNavigate(newHome, newAway, correctedTotal);
+      // Accumulate timeouts from this last rack before saving
+      const usedHome = timeoutsForSL(homePlayer.skill_level) - timeoutsHome;
+      const usedAway = timeoutsForSL(awayPlayer.skill_level) - timeoutsAway;
+      setTotalTimeoutsHome(t => t + usedHome);
+      setTotalTimeoutsAway(t => t + usedAway);
+      saveAndNavigate(newHome, newAway, correctedTotal, totalTimeoutsHome + usedHome, totalTimeoutsAway + usedAway);
     } else {
+      // Accumulate timeouts from completed rack before resetting
+      const usedHome = timeoutsForSL(homePlayer.skill_level) - timeoutsHome;
+      const usedAway = timeoutsForSL(awayPlayer.skill_level) - timeoutsAway;
+      setTotalTimeoutsHome(t => t + usedHome);
+      setTotalTimeoutsAway(t => t + usedAway);
       // Winner breaks next rack
       setRackNumber(n => n + 1);
       initRack(rackWinner);
@@ -779,6 +837,15 @@ export default function IndividualMatchScoringScreen() {
             setVerifyDiscrepancy(false);
             setActionPhase('innings_verify');
           }
+          // Primary scorer undid — both columns cleared while we're in verify → exit verify
+          if (
+            row.innings_verify_home === null && row.innings_verify_away === null &&
+            actionPhase === 'innings_verify'
+          ) {
+            setActionPhase('turn');
+            setVerifySubmitted(false);
+            setVerifyDiscrepancy(false);
+          }
           // Sync scoreboard totals from primary scorer's row
           if (row.racks_home !== undefined) setRacksWonHome(row.racks_home);
           if (row.racks_away !== undefined) setRacksWonAway(row.racks_away);
@@ -791,8 +858,10 @@ export default function IndividualMatchScoringScreen() {
 
   // ─── Save & navigate ─────────────────────────────────────────────────────────
 
-  async function saveAndNavigate(finalHome: number, finalAway: number, inningsOverride?: number) {
+  async function saveAndNavigate(finalHome: number, finalAway: number, inningsOverride?: number, tHome?: number, tAway?: number) {
     const innings = inningsOverride ?? totalInnings;
+    const timeoutsHomeFinal = tHome ?? totalTimeoutsHome;
+    const timeoutsAwayFinal = tAway ?? totalTimeoutsAway;
 
     if (individualMatchId) {
       const net = await NetInfo.fetch();
@@ -815,6 +884,10 @@ export default function IndividualMatchScoringScreen() {
               home_points_earned: finalHome,
               away_points_earned: finalAway,
               innings,
+              timeouts_home: timeoutsHomeFinal,
+              timeouts_away: timeoutsAwayFinal,
+              is_completed: true,
+              completed_at: new Date().toISOString(),
             })
             .eq('id', individualMatchId);
 
@@ -914,7 +987,7 @@ export default function IndividualMatchScoringScreen() {
 
             <Pressable
               style={({ pressed }) => [styles.lagBtn, pressed && styles.pressed]}
-              onPress={() => initRack('home')}
+              onPress={() => handleLagSelected('home')}
             >
               <Text style={styles.lagBtnName}>{homePlayer.name}</Text>
               <Text style={styles.lagBtnSub}>Home · SL {homePlayer.skill_level}</Text>
@@ -922,7 +995,7 @@ export default function IndividualMatchScoringScreen() {
 
             <Pressable
               style={({ pressed }) => [styles.lagBtn, pressed && styles.pressed]}
-              onPress={() => initRack('away')}
+              onPress={() => handleLagSelected('away')}
             >
               <Text style={styles.lagBtnName}>{awayPlayer.name}</Text>
               <Text style={styles.lagBtnSub}>Away · SL {awayPlayer.skill_level}</Text>
@@ -1159,7 +1232,11 @@ export default function IndividualMatchScoringScreen() {
                 onPress={() => { resetInactivity(); undoLastAction(); }}
               >
                 <Ionicons name="arrow-undo" size={18} color={theme.colors.textSecondary} />
-                <Text style={styles.undoBtnText}>Back to {lastSnapshot.shooterName}'s turn</Text>
+                <Text style={styles.undoBtnText}>
+                  {lastSnapshot.rackNumber < rackNumber
+                    ? 'Undo Last Rack'
+                    : `Back to ${lastSnapshot.shooterName}'s turn`}
+                </Text>
               </Pressable>
             )}
           </View>
@@ -1307,6 +1384,25 @@ export default function IndividualMatchScoringScreen() {
                 >
                   <Text style={styles.verifyConfirmText}>Use This Count for Both</Text>
                 </Pressable>
+                {lastSnapshot && (
+                  <Pressable
+                    style={({ pressed }) => [styles.undoBtn, { width: '100%', marginTop: 8 }, pressed && styles.pressed]}
+                    onPress={async () => {
+                      resetInactivity();
+                      if (individualMatchId) {
+                        await supabase.from('individual_matches')
+                          .update({ innings_verify_home: null, innings_verify_away: null } as any)
+                          .eq('id', individualMatchId);
+                      }
+                      setVerifyDiscrepancy(false);
+                      setVerifySubmitted(false);
+                      undoLastAction();
+                    }}
+                  >
+                    <Ionicons name="arrow-undo" size={18} color={theme.colors.textSecondary} />
+                    <Text style={styles.undoBtnText}>Undo Game Over</Text>
+                  </Pressable>
+                )}
               </>
             ) : verifySubmitted ? (
               /* ── Two-device: waiting for partner ── */
@@ -1317,6 +1413,27 @@ export default function IndividualMatchScoringScreen() {
                   Waiting for the other scorekeeper to submit their count…
                 </Text>
                 <Ionicons name="hourglass-outline" size={48} color={theme.colors.textSecondary} />
+                {lastSnapshot && (
+                  <Pressable
+                    style={({ pressed }) => [styles.undoBtn, { width: '100%', marginTop: 16 }, pressed && styles.pressed]}
+                    onPress={async () => {
+                      resetInactivity();
+                      if (individualMatchId && ourSide) {
+                        const col = isFollower
+                          ? (ourSide === 'home' ? 'innings_verify_away' : 'innings_verify_home')
+                          : (ourSide === 'home' ? 'innings_verify_home' : 'innings_verify_away');
+                        await supabase.from('individual_matches')
+                          .update({ [col]: null } as any)
+                          .eq('id', individualMatchId);
+                      }
+                      setVerifySubmitted(false);
+                      undoLastAction();
+                    }}
+                  >
+                    <Ionicons name="arrow-undo" size={18} color={theme.colors.textSecondary} />
+                    <Text style={styles.undoBtnText}>Undo Game Over</Text>
+                  </Pressable>
+                )}
               </>
             ) : (
               /* ── Two-device: enter and submit ── */

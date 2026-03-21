@@ -126,7 +126,7 @@ export default function TeamHistoryIndex() {
 
     const { data, error } = await supabase
       .from('team_matches')
-      .select('id, match_date, status, home_score, away_score, home_team_id, away_team_id, home_team:teams!home_team_id(name), away_team:teams!away_team_id(name), division:divisions!division_id(league:leagues!league_id(game_format))')
+      .select('id, match_date, status, home_score, away_score, home_team_id, away_team_id, game_format, home_team:teams!home_team_id(name), away_team:teams!away_team_id(name)')
       .or(`home_team_id.eq.${teamId},away_team_id.eq.${teamId}`)
       .in('status', ['completed', 'finalized'])
       .order('match_date', { ascending: false });
@@ -140,7 +140,7 @@ export default function TeamHistoryIndex() {
       const isHome = m.home_team_id === teamId;
       const ourScore = isHome ? (m.home_score ?? 0) : (m.away_score ?? 0);
       const theirScore = isHome ? (m.away_score ?? 0) : (m.home_score ?? 0);
-      const gameFormat = m.division?.league?.game_format === 'nine_ball' ? '9-ball' : '8-ball';
+      const gameFormat = m.game_format === 'nine_ball' ? '9-ball' : '8-ball';
 
       let result: 'win' | 'loss' | 'tie';
       if (ourScore > theirScore) result = 'win';

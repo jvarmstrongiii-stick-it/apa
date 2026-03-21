@@ -1,7 +1,9 @@
-import { useState, useCallback, useRef } from 'react';
+import { useState, useCallback, useRef, useEffect } from 'react';
 import {
+  ActivityIndicator,
   Alert,
   FlatList,
+  Modal,
   Pressable,
   StyleSheet,
   Text,
@@ -194,14 +196,45 @@ export default function TeamScoringIndex() {
   const [refreshing, setRefreshing] = useState(false);
   const [pendingMatchIds, setPendingMatchIds] = useState<Set<string>>(new Set());
   const [coinFlipVisible, setCoinFlipVisible] = useState(false);
+  const [waitingMatchId, setWaitingMatchId] = useState<string | null>(null);
   const pendingMatchId = useRef<string | null>(null);
   const pendingIsHome = useRef<boolean>(true);
 
   const handleScheduledPress = (matchId: string, isHome: boolean) => {
-    pendingMatchId.current = matchId;
-    pendingIsHome.current = isHome;
-    setCoinFlipVisible(true);
+    if (isHome) {
+      pendingMatchId.current = matchId;
+      pendingIsHome.current = isHome;
+      setCoinFlipVisible(true);
+    } else {
+      setWaitingMatchId(matchId);
+    }
   };
+
+  // Away team: subscribe to individual_matches INSERT for the match we're waiting on.
+  // When the home team's putup screen creates the first row, auto-navigate to progress.
+  useEffect(() => {
+    if (!waitingMatchId) return;
+    const matchId = waitingMatchId;
+
+    const channel = supabase
+      .channel(`waiting_coinflip_${matchId}`)
+      .on(
+        'postgres_changes',
+        {
+          event: 'INSERT',
+          schema: 'public',
+          table: 'individual_matches',
+          filter: `team_match_id=eq.${matchId}`,
+        },
+        () => {
+          setWaitingMatchId(null);
+          router.push(`/(team)/(tabs)/scoring/${matchId}/progress`);
+        }
+      )
+      .subscribe();
+
+    return () => { supabase.removeChannel(channel); };
+  }, [waitingMatchId]);
 
   const handleResetMatch = (matchId: string) => {
     Alert.alert(
@@ -249,7 +282,7 @@ export default function TeamScoringIndex() {
 
     const { data, error } = await supabase
       .from('team_matches')
-      .select('id, match_date, status, home_team_id, away_team_id, home_team:teams!home_team_id(name), away_team:teams!away_team_id(name), division:divisions!division_id(location, league:leagues!league_id(game_format, scorekeeper_count)), individual_matches(id, match_order)')
+      .select('id, match_date, status, home_team_id, away_team_id, game_format, home_team:teams!home_team_id(name), away_team:teams!away_team_id(name), division:divisions!division_id(location, league:leagues!league_id(scorekeeper_count)), individual_matches(id, match_order)')
       .or(`home_team_id.eq.${teamId},away_team_id.eq.${teamId}`)
       .in('status', ['scheduled', 'lineup_set', 'in_progress'])
       .order('match_date', { ascending: true });
@@ -261,7 +294,7 @@ export default function TeamScoringIndex() {
 
     const mapped: ScorableMatch[] = (data ?? []).map((m: any) => {
       const isHome = m.home_team_id === teamId;
-      const gameFormat = m.division?.league?.game_format === 'nine_ball' ? '9-ball' : '8-ball';
+      const gameFormat = m.game_format === 'nine_ball' ? '9-ball' : '8-ball';
       const individualMatches = m.individual_matches ?? [];
       const currentMatch = individualMatches.length > 0
         ? Math.max(...individualMatches.map((im: any) => im.match_order))
@@ -302,9 +335,39 @@ export default function TeamScoringIndex() {
     }
   };
 
+  const waitingMatch = matches.find(m => m.id === waitingMatchId);
+
   return (
     <SafeAreaView style={styles.safeArea} edges={['top']}>
       <CoinFlipModal visible={coinFlipVisible} onReady={handleCoinFlipReady} onCancel={() => setCoinFlipVisible(false)} />
+
+      {/* Away team waiting modal — shown while home team does the coin flip */}
+      <Modal visible={waitingMatchId !== null} transparent animationType="fade">
+        <View style={styles.waitingOverlay}>
+          <View style={styles.waitingCard}>
+            <Text style={styles.waitingTitle}>Waiting for Coin Flip</Text>
+            {waitingMatch && (
+              <Text style={styles.waitingOpponent}>vs {waitingMatch.opponent_name}</Text>
+            )}
+            <Text style={styles.waitingBody}>
+              The home team is flipping the coin to decide who puts up first.
+              This screen will update automatically when they are ready.
+            </Text>
+            <ActivityIndicator
+              size="large"
+              color={theme.colors.primary}
+              style={styles.waitingSpinner}
+            />
+            <Pressable
+              style={styles.waitingCancel}
+              onPress={() => setWaitingMatchId(null)}
+            >
+              <Text style={styles.waitingCancelText}>Cancel</Text>
+            </Pressable>
+          </View>
+        </View>
+      </Modal>
+
       <View style={styles.headerBar}>
         <Text style={styles.headerTitle}>Scoring</Text>
       </View>
@@ -517,6 +580,52 @@ const styles = StyleSheet.create({
   resetButtonText: {
     fontSize: 13,
     color: '#F44336',
+    fontWeight: '500',
+  },
+  waitingOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.6)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 24,
+  },
+  waitingCard: {
+    backgroundColor: theme.colors.surface,
+    borderRadius: 20,
+    padding: 32,
+    width: '100%',
+    maxWidth: 360,
+    alignItems: 'center',
+    gap: 12,
+  },
+  waitingTitle: {
+    fontSize: 22,
+    fontWeight: '700',
+    color: theme.colors.text,
+    textAlign: 'center',
+  },
+  waitingOpponent: {
+    fontSize: 15,
+    fontWeight: '600',
+    color: theme.colors.primary,
+    textAlign: 'center',
+  },
+  waitingBody: {
+    fontSize: 15,
+    color: theme.colors.textSecondary,
+    textAlign: 'center',
+    lineHeight: 22,
+  },
+  waitingSpinner: {
+    marginVertical: 8,
+  },
+  waitingCancel: {
+    paddingVertical: 10,
+    paddingHorizontal: 24,
+  },
+  waitingCancelText: {
+    fontSize: 16,
+    color: theme.colors.textSecondary,
     fontWeight: '500',
   },
 });

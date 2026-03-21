@@ -560,6 +560,7 @@ async function findOrCreateTeamMatch(
   matchDate: string,
   weekNumber: number,
   importId: string,
+  gameFormat: 'eight_ball' | 'nine_ball',
 ): Promise<string> {
   const { data } = await db
     .from('team_matches')
@@ -582,6 +583,7 @@ async function findOrCreateTeamMatch(
       week_number:  weekNumber,
       status:       'imported',
       import_id:    importId,
+      game_format:  gameFormat,
     })
     .select('id')
     .single();
@@ -593,64 +595,79 @@ async function findOrCreateTeamMatch(
 async function findOrCreatePlayer(
   db: DB,
   player: PlayerData,
+  sl: number,
   gameFormat: string,
+  leagueId: string,
 ): Promise<string> {
   const { firstName, lastName } = parseName(player.fullName);
+  const slCol = gameFormat === 'nine_ball' ? 'current_9_ball_sl' : 'current_8_ball_sl';
 
   // First try to find by member_number (definitive identifier)
   if (!player.memberNumber.startsWith('TMP-')) {
     const { data } = await db
       .from('players')
-      .select('id')
+      .select('id, current_8_ball_sl, current_9_ball_sl')
       .eq('member_number', player.memberNumber)
       .maybeSingle();
 
     if (data) {
       // Member number is immutable; name and SL can change — always update them.
-      // Write to both skill_level (backward compat) and the format-specific column.
-      const slUpdate: Record<string, unknown> = {
-        first_name:  firstName,
-        last_name:   lastName,
-        skill_level: player.skillLevel,
-      };
-      if (gameFormat === 'eight_ball') slUpdate.eight_ball_sl = player.skillLevel;
-      else                             slUpdate.nine_ball_sl  = player.skillLevel;
+      await db.from('players').update({
+        first_name: firstName,
+        last_name:  lastName,
+        [slCol]:    sl,
+      }).eq('id', data.id);
 
-      await db.from('players').update(slUpdate).eq('id', data.id);
+      // Write skill_level_history if SL changed for this format.
+      const oldSL = gameFormat === 'nine_ball' ? data.current_9_ball_sl : data.current_8_ball_sl;
+      if (oldSL !== sl) {
+        await db.from('skill_level_history').insert({
+          player_id:   data.id,
+          league_id:   leagueId,
+          old_level:   oldSL ?? sl,
+          new_level:   sl,
+          game_format: gameFormat,
+        });
+      }
+
       return data.id;
     }
   }
 
-  // Fall back to name + game_format match
+  // Fall back to name match (no format filter — a player may play multiple formats)
   const { data: byName } = await db
     .from('players')
     .select('id')
     .eq('first_name', firstName)
     .eq('last_name', lastName)
-    .eq('game_format', gameFormat)
     .maybeSingle();
 
   if (byName) return byName.id;
 
-  // Create new player — populate both skill_level and format-specific column
-  const newPlayerData: Record<string, unknown> = {
-    first_name:    firstName,
-    last_name:     lastName,
-    member_number: player.memberNumber,
-    skill_level:   player.skillLevel,
-    game_format:   gameFormat,
-    is_active:     true,
-  };
-  if (gameFormat === 'eight_ball') newPlayerData.eight_ball_sl = player.skillLevel;
-  else                             newPlayerData.nine_ball_sl  = player.skillLevel;
-
+  // Create new player.
   const { data: created, error } = await db
     .from('players')
-    .insert(newPlayerData)
+    .insert({
+      first_name:    firstName,
+      last_name:     lastName,
+      member_number: player.memberNumber,
+      [slCol]:       sl,
+      is_active:     true,
+    })
     .select('id')
     .single();
 
   if (error) throw new Error(`Failed to create player "${player.fullName}": ${error.message}`);
+
+  // Initial skill_level_history entry — old_level = new_level for first import.
+  await db.from('skill_level_history').insert({
+    player_id:   created.id,
+    league_id:   leagueId,
+    old_level:   sl,
+    new_level:   sl,
+    game_format: gameFormat,
+  });
+
   return created.id;
 }
 
@@ -660,14 +677,17 @@ async function upsertTeamPlayer(
   playerId: string,
   matchesPlayed: number,
   isCaptain: boolean,
+  sl: number,
+  gameFormat: string,
 ): Promise<void> {
   // is_captain is always written — the scoresheet is authoritative.
   // First player per team = captain (true); all others reset to false.
   // This ensures a captain change on a new scoresheet is immediately reflected.
+  const slCol = gameFormat === 'nine_ball' ? 'current_9_ball_sl' : 'current_8_ball_sl';
   const { error } = await db
     .from('team_players')
     .upsert(
-      { team_id: teamId, player_id: playerId, matches_played: matchesPlayed, is_captain: isCaptain },
+      { team_id: teamId, player_id: playerId, matches_played: matchesPlayed, is_captain: isCaptain, [slCol]: sl },
       { onConflict: 'team_id,player_id' },
     );
 
@@ -763,12 +783,13 @@ serve(async (req: Request) => {
 
     let processedRows = 0;
     let errorRows     = 0;
+    let firstRowError: string | undefined;
 
     try {
       const divisionId = await findOrCreateDivision(supabaseAdmin, leagueId, match.divisionName, match.divisionNumber);
       const homeTeamId = await findOrCreateTeam(supabaseAdmin, divisionId, match.homeTeam.number, match.homeTeam.name);
       const awayTeamId = await findOrCreateTeam(supabaseAdmin, divisionId, match.awayTeam.number, match.awayTeam.name);
-      await findOrCreateTeamMatch(supabaseAdmin, divisionId, homeTeamId, awayTeamId, match.matchDate, match.weekNumber, importId);
+      await findOrCreateTeamMatch(supabaseAdmin, divisionId, homeTeamId, awayTeamId, match.matchDate, match.weekNumber, importId, match.gameFormat);
 
       // isFirst: true for the first player on each team's list — APA rule: first player = captain.
       const allPlayers: Array<{ player: PlayerData; teamId: string; isFirst: boolean }> = [
@@ -776,33 +797,55 @@ serve(async (req: Request) => {
         ...match.awayPlayers.map((p, i) => ({ player: p, teamId: awayTeamId, isFirst: i === 0 })),
       ];
 
+      // Track first player IDs per team for post-loop captain enforcement.
+      let homeFirstPlayerId: string | null = null;
+      let awayFirstPlayerId: string | null = null;
+
       for (let i = 0; i < allPlayers.length; i++) {
         const { player, teamId, isFirst } = allPlayers[i];
         try {
-          const playerId = await findOrCreatePlayer(supabaseAdmin, player, match.gameFormat);
-          await upsertTeamPlayer(supabaseAdmin, teamId, playerId, player.matchesPlayed, isFirst);
+          const sl = player.skillLevel === 0 ? 3 : player.skillLevel;
+          const playerId = await findOrCreatePlayer(supabaseAdmin, player, sl, match.gameFormat, leagueId);
+          await upsertTeamPlayer(supabaseAdmin, teamId, playerId, player.matchesPlayed, isFirst, sl, match.gameFormat);
+
+          if (isFirst && teamId === homeTeamId) homeFirstPlayerId = playerId;
+          if (isFirst && teamId === awayTeamId) awayFirstPlayerId = playerId;
 
           await supabaseAdmin.from('import_rows').insert({
             import_id:  importId,
             row_number: i + 1,
-            raw_data:   { ...player, team } as unknown as Record<string, unknown>,
+            raw_data:   { ...player, teamId } as unknown as Record<string, unknown>,
             status:     'success',
           });
           processedRows++;
         } catch (rowErr: unknown) {
           const msg = rowErr instanceof Error ? rowErr.message : String(rowErr);
+          if (!firstRowError) firstRowError = msg;
           await supabaseAdmin.from('import_rows').insert({
             import_id:     importId,
             row_number:    i + 1,
-            raw_data:      { ...player, team } as unknown as Record<string, unknown>,
+            raw_data:      { ...player, teamId } as unknown as Record<string, unknown>,
             status:        'error',
             error_message: msg,
           });
           errorRows++;
         }
       }
+
+      // Explicitly enforce captain flags — the first player per team is always the captain.
+      // Reset all players on each team to false, then set the first player to true.
+      // This is authoritative: if a captain changes between imports it will be corrected.
+      if (homeFirstPlayerId) {
+        await supabaseAdmin.from('team_players').update({ is_captain: false }).eq('team_id', homeTeamId).neq('player_id', homeFirstPlayerId);
+        await supabaseAdmin.from('team_players').update({ is_captain: true }).eq('team_id', homeTeamId).eq('player_id', homeFirstPlayerId);
+      }
+      if (awayFirstPlayerId) {
+        await supabaseAdmin.from('team_players').update({ is_captain: false }).eq('team_id', awayTeamId).neq('player_id', awayFirstPlayerId);
+        await supabaseAdmin.from('team_players').update({ is_captain: true }).eq('team_id', awayTeamId).eq('player_id', awayFirstPlayerId);
+      }
     } catch (batchErr: unknown) {
       const msg = batchErr instanceof Error ? batchErr.message : String(batchErr);
+      if (!firstRowError) firstRowError = msg;
       await supabaseAdmin.from('import_rows').insert({
         import_id:     importId,
         row_number:    0,
@@ -824,8 +867,11 @@ serve(async (req: Request) => {
       completed_at:   new Date().toISOString(),
     }).eq('id', importId);
 
+    // Include the first error message so the client can show the real failure reason.
+    const responseBody: Record<string, unknown> = { success: processedRows > 0, totalRows, processedRows, errorRows };
+    if (processedRows === 0 && firstRowError) responseBody.error = firstRowError;
     return new Response(
-      JSON.stringify({ success: processedRows > 0, totalRows, processedRows, errorRows }),
+      JSON.stringify(responseBody),
       { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 200 },
     );
   } catch (err: unknown) {
