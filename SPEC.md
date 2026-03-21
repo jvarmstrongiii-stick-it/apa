@@ -1,5 +1,5 @@
 # Pool League Scoring App — Working Specification
-**Living Document | Updated 2026-03-08**
+**Living Document | Updated 2026-03-20**
 
 ---
 
@@ -73,20 +73,14 @@ Three user roles: **Team** (scorekeepers, anonymous auth), **LO** (League Operat
 - Login via `/(auth)/admin-login`
 - Dashboard: Switch User (→ player login) | Log Out (→ admin login)
 
-### Login Flow (4 steps) — Team side
+### Login Flow (3 steps) — Team side
 1. **Pick**: "Continue as Player" (team picker, plain list from scheduled matches only) | "League Operator Login"
 2. **Confirm**: "You selected [team]?" → Yes / Change Team
 3. **Who Are You?**: roster picker — player selects their own name; sets `profiles.player_id` + stores identity in SecureStore. Returning users see "Continue as [Name]?" with Yes / Not Me options.
-4. **Match**: fetch active matches → 0 matches → dashboard | 1 match → auto-navigate | 2+ matches → list
+
+After step 3, login always routes to the **Team Dashboard** (`/`). Match navigation happens from the dashboard or the Scoring tab — not from the login flow.
 
 `refreshProfile()` is called after identity is set so `isCaptain` is accurate before navigating to team screens.
-
-### Match Navigation by Status (from login)
-| Status | Route |
-|---|---|
-| `scheduled` | `/(team)/(tabs)/scoring` (scoring tab — coin flip opens from match card) |
-| `lineup_set` | `/(team)/(tabs)/scoring/${id}/0` |
-| `in_progress` | `/(team)/(tabs)/scoring/${id}/${currentIndividualMatch ?? 0}` |
 
 ---
 
@@ -466,7 +460,7 @@ Legend: **✅ BUILT** | **🔶 PARTIAL** | **❌ NOT STARTED**
 | Approve correction | ✅ BUILT | Flag → approved + inserts into `prompt_overrides` |
 | Edit before approving | ✅ BUILT | Inline TextInput pre-filled with proposed correction |
 | Dismiss flag | ✅ BUILT | Flag → dismissed |
-| Player/team attribution | ✅ BUILT | Joined via `user_id → profiles.player_id → players.name` + `team_players → teams.name`; shows "Anonymous" until player identity implemented |
+| Player/team attribution | ✅ BUILT | `rules-flags.tsx` bulk-fetches `profiles` joined to `players` + `teams` for all `user_id`s in the flag list; shows "Name from Team" when player completed login (team + identity confirmed), falls back to "Anonymous" if widget was used before login (profile has no `player_id`) |
 
 ---
 
@@ -475,7 +469,7 @@ Legend: **✅ BUILT** | **🔶 PARTIAL** | **❌ NOT STARTED**
 | Screen | Route | Status | Notes |
 |---|---|---|---|
 | **AUTH** | | | |
-| Login | `/(auth)/login` | ✅ BUILT | 4-step: pick → confirm → who_are_you → match |
+| Login | `/(auth)/login` | ✅ BUILT | 3-step: pick → confirm → who_are_you; always routes to dashboard |
 | Admin Login | `/(auth)/admin-login` | ✅ BUILT | Email/password (LO + superuser) |
 | Forgot Password | — | ❌ NOT STARTED | |
 | **TEAM** | | | |
@@ -486,9 +480,11 @@ Legend: **✅ BUILT** | **🔶 PARTIAL** | **❌ NOT STARTED**
 | Catchup Wizard | `/(team)/(tabs)/scoring/[matchId]/catchup` | ✅ BUILT | Retroactive data entry |
 | Put Up | `/(team)/(tabs)/scoring/[matchId]/putup` | ✅ BUILT | Realtime two-device |
 | Resume | `/(team)/(tabs)/scoring/[matchId]/resume` | ✅ BUILT | |
+| Match Progress | `/(team)/(tabs)/scoring/[matchId]/progress` | ✅ BUILT | 5-slot list for in_progress matches; routes to putup or scoring per slot |
 | Individual Match Scoring | `/(team)/(tabs)/scoring/[matchId]/[individualMatchIndex]` | ✅ BUILT | Full scoring screen |
 | Finalize | `/(team)/(tabs)/scoring/[matchId]/finalize` | ✅ BUILT | |
-| Schedule | `/(team)/(tabs)/schedule` | ❌ NOT STARTED | Linked from Quick Actions |
+| Schedule | `/(team)/(tabs)/schedule` | ✅ BUILT | Tappable match cards; pull-to-refresh |
+| Match Detail (read-only) | `/(team)/(tabs)/schedule/[matchId]` | ✅ BUILT | scheduled → both rosters (SL, MP, captain); in_progress → 5-slot progress; completed/finalized → results with APA points |
 | Roster | `/(team)/(tabs)/roster` | ✅ BUILT | View + captain edit mode (remove, add, co-captain promote) |
 | Match History | `/(team)/(tabs)/history` | ❌ NOT STARTED | Linked from Quick Actions |
 | Live Viewer (read-only) | — | ❌ NOT STARTED | |
@@ -574,7 +570,7 @@ Hardcoded in scoring screen and catchup wizard. Also exists in DB as `eight_ball
 
 ### Game Over — Break Result
 1. Made 8 on the Break (current player wins — special flag)
-2. Break and Run (current player wins — special flag)
+2. Break and Run (current player wins — special flag; **only available to the breaking player while they have not yet ended their turn** — once the breaker's turn ends, Break and Run is permanently gone for that rack even if they return to the table)
 3. Fouled & Pocketed 8 Ball (opponent wins)
 
 ### Game Over — Normal (8-Ball)
@@ -661,7 +657,7 @@ Both buttons on the superuser dashboard sign out and navigate away (Switch User 
 - [ ] Wire `scorecard_sessions` for basic conflict detection (prevent two devices scoring same match simultaneously)
 
 ### Priority 2 — Missing Screens (team side)
-- [ ] Schedule screen `/(team)/(tabs)/schedule`
+- [x] Schedule screen `/(team)/(tabs)/schedule` — tappable cards + read-only detail views for all match statuses
 - [x] Roster screen `/(team)/(tabs)/roster` — view + captain edit (add/remove/co-captain)
 - [ ] Match History screen `/(team)/(tabs)/history`
 
@@ -755,5 +751,9 @@ ON CONFLICT (id) DO NOTHING;
 | 00022 | `lo_profile_fields.sql` | profiles.first_name, last_name, email, league_id |
 | 00023 | `roster_edit_player_identity.sql` | players: eight_ball_sl + nine_ball_sl; team_players: default SL→3; profiles: player_id FK; helper functions; captain/roster RLS; set_player_identity, find_player_by_member_number, check_division_conflict RPCs |
 | 00024 | `rules_flags.sql` | rules_flags table (player-submitted rule challenges) + prompt_overrides table (LO-approved corrections); RLS: authenticated insert own flags, lo/admin read+update flags, authenticated read approved overrides, lo/admin insert+update overrides |
+| 00025 | `players_opponent_roster_read.sql` | Allow authenticated users to read any player row (needed for full opponent roster browse during put-up) |
+| 00026 | `broadcasts.sql` | broadcasts, broadcast_replies, broadcast_dismissals, broadcast_reads, broadcast_thread_messages tables; RLS; Realtime |
+| 00027 | `scoreboard_stats.sql` | Timeout counts and lag winner columns on individual_matches for scoreboard display |
+| 00028 | `broadcast_replies_player_id.sql` | Add player_id (FK → players) to broadcast_replies; partial unique index (broadcast_id, player_id); update own_read_replies RLS to match by player_id across sessions |
 
-*Last updated: 2026-03-08 | Maintained alongside codebase in `/apa/SPEC.md`*
+*Last updated: 2026-03-20 | Maintained alongside codebase in `/apa/SPEC.md`*

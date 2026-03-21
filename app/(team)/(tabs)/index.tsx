@@ -1,5 +1,5 @@
-import { useState, useCallback } from 'react';
-import { ActivityIndicator, Alert, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { useState, useCallback, useEffect } from 'react';
+import { ActivityIndicator, Alert, Modal, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router, useFocusEffect } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
@@ -7,6 +7,7 @@ import { theme } from '../../../src/constants/theme';
 import { useAuthContext } from '../../../src/providers/AuthProvider';
 import { supabase } from '../../../src/lib/supabase';
 import { CoinFlipModal, CoinFlipResult } from '../../../src/components/CoinFlipModal';
+import { BroadcastCard, BroadcastThreadMessage } from '../../../src/components/BroadcastCard';
 
 interface TeamData {
   teamName: string;
@@ -28,9 +29,24 @@ interface TeamData {
   };
 }
 
+interface Broadcast {
+  id: string;
+  created_at: string;
+  body: string;
+  type: 'message' | 'poll';
+  reply_type: 'none' | 'text' | 'options';
+  reply_options: string[] | null;
+  audience_type: string;
+  audience_ids: string[] | null;
+  closed_at: string | null;
+  is_archived?: boolean;
+  expires_at?: string | null;
+}
+
 export default function TeamDashboard() {
-  const { profile } = useAuthContext();
+  const { profile, isCaptain } = useAuthContext();
   const teamId = profile?.team_id;
+  const userId = profile?.id;
 
   const [teamData, setTeamData] = useState<TeamData>({
     teamName: '',
@@ -41,9 +57,13 @@ export default function TeamDashboard() {
   });
   const [isLoading, setIsLoading] = useState(true);
   const [coinFlipVisible, setCoinFlipVisible] = useState(false);
+  const [waitingVisible, setWaitingVisible] = useState(false);
+  const [broadcasts, setBroadcasts] = useState<Broadcast[]>([]);
+  const [broadcastReplies, setBroadcastReplies] = useState<Record<string, string>>({});
+  const [broadcastThreads, setBroadcastThreads] = useState<Record<string, BroadcastThreadMessage[]>>({});
 
   const fetchDashboard = useCallback(async () => {
-    if (!teamId) { setIsLoading(false); return; }
+    if (!teamId || !userId) { setIsLoading(false); return; }
 
     try {
       // Fetch team name
@@ -93,6 +113,54 @@ export default function TeamDashboard() {
         };
       }
 
+      // Fetch broadcasts, replies, dismissals, and direct thread messages in parallel
+      const [broadcastsRes, repliesRes, dismissalsRes, threadsRes] = await Promise.all([
+        supabase
+          .from('broadcasts')
+          .select('id, created_at, body, type, reply_type, reply_options, audience_type, audience_ids, closed_at')
+          .order('created_at', { ascending: false }),
+        supabase.from('broadcast_replies').select('broadcast_id, body'),
+        supabase.from('broadcast_dismissals').select('broadcast_id').eq('user_id', userId),
+        supabase
+          .from('broadcast_thread_messages')
+          .select('id, created_at, broadcast_id, body, is_from_lo')
+          .eq('thread_user_id', userId)
+          .order('created_at', { ascending: true }),
+      ]);
+
+      if (broadcastsRes.error) console.error('[Dashboard] broadcasts fetch error:', broadcastsRes.error);
+
+      const dismissedIds = new Set((dismissalsRes.data ?? []).map((d: any) => d.broadcast_id));
+      const repliedIds = new Set((repliesRes.data ?? []).map((r: any) => r.broadcast_id));
+      const replyMap: Record<string, string> = {};
+      for (const r of repliesRes.data ?? []) replyMap[(r as any).broadcast_id] = (r as any).body;
+
+      const threadMap: Record<string, BroadcastThreadMessage[]> = {};
+      for (const m of (threadsRes.data ?? []) as BroadcastThreadMessage[]) {
+        if (!threadMap[m.broadcast_id]) threadMap[m.broadcast_id] = [];
+        threadMap[m.broadcast_id].push(m);
+      }
+
+      // Client-side audience filter
+      const visible = ((broadcastsRes.data ?? []) as Broadcast[]).filter(b => {
+        if (dismissedIds.has(b.id) || repliedIds.has(b.id)) return false;
+        switch (b.audience_type) {
+          case 'all': return true;
+          case 'captains_only': return isCaptain;
+          case 'teams': return (b.audience_ids ?? []).includes(teamId!);
+          // These require player identity — show to all for now until that feature lands
+          case 'players':
+          case 'eight_ball':
+          case 'nine_ball':
+          case 'masters':
+          default: return true;
+        }
+      });
+
+      setBroadcasts(visible);
+      setBroadcastReplies(replyMap);
+      setBroadcastThreads(threadMap);
+
       setTeamData({
         teamName: team?.name ?? 'My Team',
         wins,
@@ -110,13 +178,140 @@ export default function TeamDashboard() {
     } finally {
       setIsLoading(false);
     }
-  }, [teamId]);
+  }, [teamId, userId, isCaptain]);
 
   useFocusEffect(
     useCallback(() => {
       fetchDashboard();
     }, [fetchDashboard])
   );
+
+  // Realtime: new broadcasts pushed to this team
+  useEffect(() => {
+    if (!teamId || !userId) return;
+    const channel = supabase
+      .channel('team_new_broadcasts')
+      .on(
+        'postgres_changes',
+        { event: 'INSERT', schema: 'public', table: 'broadcasts' },
+        (payload) => {
+          const b = payload.new as Broadcast;
+          if (b.is_archived) return;
+          if (b.expires_at && new Date(b.expires_at) <= new Date()) return;
+          // Apply same audience filter
+          const passes = (() => {
+            switch (b.audience_type) {
+              case 'all': return true;
+              case 'captains_only': return isCaptain;
+              case 'teams': return (b.audience_ids ?? []).includes(teamId);
+              default: return true;
+            }
+          })();
+          if (passes) setBroadcasts(prev => [b, ...prev]);
+        }
+      )
+      .subscribe();
+
+    return () => { channel.unsubscribe(); };
+  }, [teamId, userId, isCaptain]);
+
+  // Realtime: direct LO thread messages addressed to this user
+  useEffect(() => {
+    if (!userId) return;
+    const channel = supabase
+      .channel(`lo_thread_${userId}`)
+      .on(
+        'postgres_changes',
+        {
+          event: 'INSERT',
+          schema: 'public',
+          table: 'broadcast_thread_messages',
+          filter: `thread_user_id=eq.${userId}`,
+        },
+        (payload) => {
+          const m = payload.new as BroadcastThreadMessage;
+          setBroadcastThreads(prev => ({
+            ...prev,
+            [m.broadcast_id]: [...(prev[m.broadcast_id] ?? []), m],
+          }));
+        }
+      )
+      .subscribe();
+
+    return () => { channel.unsubscribe(); };
+  }, [userId]);
+
+  // Away team: subscribe to individual_matches INSERT while waiting for coin flip
+  useEffect(() => {
+    if (!waitingVisible || !teamData.nextMatch) return;
+    const matchId = teamData.nextMatch.id;
+
+    const channel = supabase
+      .channel(`waiting_coinflip_dash_${matchId}`)
+      .on(
+        'postgres_changes',
+        {
+          event: 'INSERT',
+          schema: 'public',
+          table: 'individual_matches',
+          filter: `team_match_id=eq.${matchId}`,
+        },
+        () => {
+          setWaitingVisible(false);
+          router.push(`/(team)/(tabs)/scoring/${matchId}/progress`);
+        }
+      )
+      .subscribe();
+
+    return () => { supabase.removeChannel(channel); };
+  }, [waitingVisible, teamData.nextMatch]);
+
+  // Broadcast handlers
+  const handleBroadcastReply = useCallback(async (broadcastId: string, text: string) => {
+    if (!userId || !teamId) return;
+    const playerId = (profile as any)?.player_id ?? undefined;
+    const { error } = await supabase.from('broadcast_replies').insert({
+      broadcast_id: broadcastId,
+      user_id: userId,
+      team_id: teamId,
+      body: text,
+      ...(playerId ? { player_id: playerId } : {}),
+    });
+    if (error) throw error;
+    setBroadcasts(prev => prev.filter(b => b.id !== broadcastId));
+  }, [userId, teamId, profile]);
+
+  const handleBroadcastDismiss = useCallback((broadcastId: string) => {
+    setBroadcasts(prev => prev.filter(b => b.id !== broadcastId));
+    supabase.from('broadcast_dismissals')
+      .insert({ broadcast_id: broadcastId, user_id: userId })
+      .then();
+  }, [userId]);
+
+  const handleThreadReply = useCallback(async (broadcastId: string, text: string) => {
+    if (!userId || !teamId) return;
+    const { error } = await supabase.from('broadcast_thread_messages').insert({
+      broadcast_id: broadcastId,
+      thread_user_id: userId,
+      thread_team_id: teamId,
+      sender_id: userId,
+      is_from_lo: false,
+      body: text,
+    });
+    if (error) throw error;
+    // Optimistically add to thread state (realtime will also fire)
+    const newMsg: BroadcastThreadMessage = {
+      id: Date.now().toString(),
+      created_at: new Date().toISOString(),
+      broadcast_id: broadcastId,
+      body: text,
+      is_from_lo: false,
+    };
+    setBroadcastThreads(prev => ({
+      ...prev,
+      [broadcastId]: [...(prev[broadcastId] ?? []), newMsg],
+    }));
+  }, [userId, teamId]);
 
   const nextMatchDate = teamData.nextMatch
     ? new Date(teamData.nextMatch.date)
@@ -165,6 +360,34 @@ export default function TeamDashboard() {
   return (
     <SafeAreaView style={styles.safeArea} edges={['top']}>
       <CoinFlipModal visible={coinFlipVisible} onReady={handleCoinFlipReady} onCancel={() => setCoinFlipVisible(false)} />
+
+      {/* Away team waiting modal — shown while home team does the coin flip */}
+      <Modal visible={waitingVisible} transparent animationType="fade">
+        <View style={styles.waitingOverlay}>
+          <View style={styles.waitingCard}>
+            <Text style={styles.waitingTitle}>Waiting for Coin Flip</Text>
+            {teamData.nextMatch && (
+              <Text style={styles.waitingOpponent}>vs {teamData.nextMatch.opponent}</Text>
+            )}
+            <Text style={styles.waitingBody}>
+              The home team is flipping the coin to decide who puts up first.
+              This screen will update automatically when they are ready.
+            </Text>
+            <ActivityIndicator
+              size="large"
+              color={theme.colors.primary}
+              style={styles.waitingSpinner}
+            />
+            <Pressable
+              style={styles.waitingCancel}
+              onPress={() => setWaitingVisible(false)}
+            >
+              <Text style={styles.waitingCancelText}>Cancel</Text>
+            </Pressable>
+          </View>
+        </View>
+      </Modal>
+
       <ScrollView
         style={styles.scrollView}
         contentContainerStyle={styles.scrollContent}
@@ -248,13 +471,19 @@ export default function TeamDashboard() {
               </View>
             </View>
 
-            {/* Score Match Button */}
+            {/* Score Match Button — home team does coin flip; away team waits */}
             <Pressable
               style={({ pressed }) => [
                 styles.scoreMatchButton,
                 pressed && styles.buttonPressed,
               ]}
-              onPress={() => setCoinFlipVisible(true)}
+              onPress={() => {
+                if (teamData.nextMatch?.isHome) {
+                  setCoinFlipVisible(true);
+                } else {
+                  setWaitingVisible(true);
+                }
+              }}
             >
               <Ionicons name="create" size={22} color="#FFFFFF" />
               <Text style={styles.scoreMatchButtonText}>Score Match</Text>
@@ -274,6 +503,26 @@ export default function TeamDashboard() {
               </Pressable>
             )}
           </View>
+        )}
+
+        {/* League Broadcasts & Polls */}
+        {broadcasts.length > 0 && (
+          <>
+            <Text style={styles.sectionTitle}>League Updates</Text>
+            {broadcasts.map(b => (
+              <BroadcastCard
+                key={b.id}
+                broadcast={b}
+                existingReply={broadcastReplies[b.id] ?? null}
+                threadMessages={broadcastThreads[b.id] ?? []}
+                userId={userId!}
+                teamId={teamId!}
+                onReply={handleBroadcastReply}
+                onDismiss={handleBroadcastDismiss}
+                onThreadReply={handleThreadReply}
+              />
+            ))}
+          </>
         )}
 
         {/* Season Summary */}
@@ -538,5 +787,51 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: '600',
     color: theme.colors.text,
+  },
+  waitingOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.6)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 24,
+  },
+  waitingCard: {
+    backgroundColor: theme.colors.surface,
+    borderRadius: 20,
+    padding: 32,
+    width: '100%',
+    maxWidth: 360,
+    alignItems: 'center',
+    gap: 12,
+  },
+  waitingTitle: {
+    fontSize: 22,
+    fontWeight: '700',
+    color: theme.colors.text,
+    textAlign: 'center',
+  },
+  waitingOpponent: {
+    fontSize: 15,
+    fontWeight: '600',
+    color: theme.colors.primary,
+    textAlign: 'center',
+  },
+  waitingBody: {
+    fontSize: 15,
+    color: theme.colors.textSecondary,
+    textAlign: 'center',
+    lineHeight: 22,
+  },
+  waitingSpinner: {
+    marginVertical: 8,
+  },
+  waitingCancel: {
+    paddingVertical: 10,
+    paddingHorizontal: 24,
+  },
+  waitingCancelText: {
+    fontSize: 16,
+    color: theme.colors.textSecondary,
+    fontWeight: '500',
   },
 });
