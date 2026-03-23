@@ -299,8 +299,10 @@ export default function IndividualMatchScoringScreen() {
           .select([
             'id',
             'lag_winner',
-            'home_player:players!home_player_id(first_name, last_name, current_8_ball_sl, current_9_ball_sl)',
-            'away_player:players!away_player_id(first_name, last_name, current_8_ball_sl, current_9_ball_sl)',
+            'home_skill_level',
+            'away_skill_level',
+            'home_player:players!home_player_id(first_name, last_name)',
+            'away_player:players!away_player_id(first_name, last_name)',
           ].join(', '))
           .eq('team_match_id', matchId)
           .eq('match_order', matchIndex + 1)
@@ -308,8 +310,8 @@ export default function IndividualMatchScoringScreen() {
 
         if (ims && ims.length > 0) {
           const im = ims[0] as any;
-          const hsl: number = im.home_player?.current_8_ball_sl ?? im.home_player?.current_9_ball_sl ?? 3;
-          const asl: number = im.away_player?.current_8_ball_sl ?? im.away_player?.current_9_ball_sl ?? 3;
+          const hsl: number = im.home_skill_level ?? 3;
+          const asl: number = im.away_skill_level ?? 3;
           const [rh, ra] = getRace(hsl, asl);
           const homeName =
             `${im.home_player?.first_name ?? ''} ${im.home_player?.last_name ?? ''}`.trim() || 'Home Player';
@@ -362,6 +364,12 @@ export default function IndividualMatchScoringScreen() {
             } catch {
               // Ignore corrupted snapshot — start fresh
             }
+          }
+
+          // If lag is already done (DB has lag_winner) but this device has no saved
+          // breakPlayer, seed breakPlayer from lag_winner so we skip the lag screen.
+          if (im.lag_winner && !savedRaw) {
+            setBreakPlayer(im.lag_winner as Side);
           }
         }
       } catch {

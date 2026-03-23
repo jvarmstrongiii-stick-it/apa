@@ -21,7 +21,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import {
   ActivityIndicator,
-  FlatList,
+  BackHandler,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -29,7 +29,7 @@ import {
   View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { router, useLocalSearchParams } from 'expo-router';
+import { router, Stack, useLocalSearchParams } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
 import NetInfo from '@react-native-community/netinfo';
@@ -84,10 +84,13 @@ export default function PutUpScreen() {
   const [indMatch, setIndMatch] = useState<IndividualMatchRecord | null>(null);
   const [roster, setRoster] = useState<RosterPlayer[]>([]);
   const [opponentRoster, setOpponentRoster] = useState<RosterPlayer[]>([]);
-  const [rosterTab, setRosterTab] = useState<'ours' | 'theirs'>('ours');
   const [opponentPlayer, setOpponentPlayer] = useState<PlayerDisplay | null>(null);
   const [saving, setSaving] = useState(false);
   const [opponentConnected, setOpponentConnected] = useState(false);
+  const [tentativePlayerId, setTentativePlayerId] = useState<string | null>(null);
+  const [opponentTentativeId, setOpponentTentativeId] = useState<string | null>(null);
+  const [priorHomeSL, setPriorHomeSL] = useState(0);
+  const [priorAwaySL, setPriorAwaySL] = useState(0);
 
   // Offline fallback — shown when connectivity is absent or Realtime times out
   const [offlineFallback, setOfflineFallback] = useState(false);
@@ -96,6 +99,12 @@ export default function PutUpScreen() {
 
   const channelRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
   const realtimeTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Block Android hardware back button during put-up
+  useEffect(() => {
+    const sub = BackHandler.addEventListener('hardwareBackPress', () => true);
+    return () => sub.remove();
+  }, []);
 
   // ─── Dev bypass (triple-tap header title → auto-fill both players) ────────
   const [devTapCount, setDevTapCount] = useState(0);
@@ -235,6 +244,17 @@ export default function PutUpScreen() {
 
       setOpponentRoster(mapRoster(oppRosterData ?? []));
 
+      // Fetch SL totals from already-completed matches this session (for matches 2–5)
+      if (matchOrder > 1) {
+        const { data: priorMatches } = await supabase
+          .from('individual_matches')
+          .select('home_skill_level, away_skill_level')
+          .eq('team_match_id', matchId)
+          .lt('match_order', matchOrder);
+        setPriorHomeSL((priorMatches ?? []).reduce((s: number, m: any) => s + (m.home_skill_level ?? 0), 0));
+        setPriorAwaySL((priorMatches ?? []).reduce((s: number, m: any) => s + (m.away_skill_level ?? 0), 0));
+      }
+
       // Fetch existing individual match, or create it
       let { data: im } = await supabase
         .from('individual_matches')
@@ -290,7 +310,7 @@ export default function PutUpScreen() {
     if (!indMatch?.id || !ourSide || !opponentTeamId) return;
 
     const channel = supabase
-      .channel(`putup_${indMatch.id}`)
+      .channel(`putup_${indMatch.id}`, { config: { broadcast: { self: false } } })
       .on(
         'postgres_changes',
         {
@@ -303,9 +323,17 @@ export default function PutUpScreen() {
           setOpponentConnected(true);
           const updated = payload.new as IndividualMatchRecord;
           setIndMatch(updated);
+          // Clear opponent tentative once they've confirmed
+          setOpponentTentativeId(null);
           await fetchOpponentPlayer(updated, ourSide, opponentTeamId);
         }
       )
+      .on('broadcast', { event: 'tentative' }, (payload) => {
+        const { side, playerId } = payload.payload ?? {};
+        if (side && side !== ourSide) {
+          setOpponentTentativeId(playerId ?? null);
+        }
+      })
       .subscribe();
 
     channelRef.current = channel;
@@ -337,18 +365,32 @@ export default function PutUpScreen() {
     return () => clearTimeout(timer);
   }, [indMatch?.home_player_id, indMatch?.away_player_id, matchId, matchOrder]);
 
-  // ─── Select our player ────────────────────────────────────────────────────
-  const selectPlayer = async (playerId: string) => {
+  // ─── Tentatively select our player (highlights row, does not write to DB) ─
+  const selectPlayer = (playerId: string) => {
     if (!indMatch || !ourSide || saving) return;
+    setTentativePlayerId(playerId);
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    // Broadcast tentative selection to opponent device
+    const player = roster.find(p => p.id === playerId);
+    channelRef.current?.send({
+      type: 'broadcast',
+      event: 'tentative',
+      payload: { side: ourSide, playerId, playerName: player?.name, sl: player?.skill_level ?? 0 },
+    });
+  };
+
+  // ─── Confirm our tentative selection → write to DB ────────────────────────
+  const confirmPlayer = async () => {
+    if (!tentativePlayerId || !indMatch || !ourSide || saving) return;
     setSaving(true);
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
 
     const field = ourSide === 'home' ? 'home_player_id' : 'away_player_id';
     const skillField = ourSide === 'home' ? 'home_skill_level' : 'away_skill_level';
-    const skillLevel = roster.find(p => p.id === playerId)?.skill_level ?? null;
+    const skillLevel = roster.find(p => p.id === tentativePlayerId)?.skill_level ?? null;
     const { data: updated } = await supabase
       .from('individual_matches')
-      .update({ [field]: playerId, [skillField]: skillLevel })
+      .update({ [field]: tentativePlayerId, [skillField]: skillLevel })
       .eq('id', indMatch.id)
       .select('id, home_player_id, away_player_id, put_up_team')
       .single();
@@ -389,6 +431,25 @@ export default function PutUpScreen() {
     router.replace(`/(team)/(tabs)/scoring/${matchId}/${matchOrder - 1}`);
   };
 
+  // ─── Computed values for SL totals and confirmed state ───────────────────
+  const ourConfirmedId = ourSide ? (ourSide === 'home' ? indMatch?.home_player_id : indMatch?.away_player_id) : null;
+  const oppConfirmedId = ourSide ? (ourSide === 'home' ? indMatch?.away_player_id : indMatch?.home_player_id) : null;
+
+  const ourDisplaySL = (() => {
+    const id = tentativePlayerId ?? ourConfirmedId;
+    return id ? (roster.find(p => p.id === id)?.skill_level ?? 0) : 0;
+  })();
+  const oppDisplaySL = (() => {
+    const id = opponentTentativeId ?? oppConfirmedId;
+    if (id) return opponentRoster.find(p => p.id === id)?.skill_level ?? 0;
+    return opponentPlayer?.skill_level ?? 0;
+  })();
+
+  const homeSLTotal = priorHomeSL + (ourSide === 'home' ? ourDisplaySL : oppDisplaySL);
+  const awaySLTotal = priorAwaySL + (ourSide === 'away' ? ourDisplaySL : oppDisplaySL);
+  const ourSLTotal = ourSide === 'home' ? homeSLTotal : awaySLTotal;
+  const oppSLTotal = ourSide === 'home' ? awaySLTotal : homeSLTotal;
+
   // ─── Determine current UI phase ───────────────────────────────────────────
   const getPhase = (): Phase => {
     if (loading || !indMatch || !ourSide) return 'loading';
@@ -418,38 +479,103 @@ export default function PutUpScreen() {
     return id ? (roster.find((p) => p.id === id)?.name ?? null) : null;
   })();
 
-  // ─── Roster list item ─────────────────────────────────────────────────────
-  const renderRosterItem = ({ item }: { item: RosterPlayer }) => (
-    <Pressable
-      style={({ pressed }) => [styles.rosterRow, pressed && styles.rowPressed]}
-      onPress={() => selectPlayer(item.id)}
-      disabled={saving}
-    >
-      <View style={styles.rosterInfo}>
-        <Text style={styles.rosterName}>{item.name}</Text>
-        <Text style={styles.rosterStats}>
-          SL {item.skill_level} · {item.matches_played} MP
-        </Text>
-      </View>
-      <Ionicons
-        name="chevron-forward"
-        size={20}
-        color={theme.colors.textSecondary}
-      />
-    </Pressable>
-  );
+  // ─── Side-by-side roster view ─────────────────────────────────────────────
+  const renderSideBySideRosters = (canSelect: boolean) => {
+    const ourLabel = ourSide === 'home' ? 'Home' : 'Away';
+    const oppLabel = ourSide === 'home' ? 'Away' : 'Home';
 
-  // ─── Opponent roster (view-only, no selection) ───────────────────────────
-  const renderOpponentRosterItem = ({ item }: { item: RosterPlayer }) => (
-    <View style={[styles.rosterRow, styles.rosterRowReadOnly]}>
-      <View style={styles.rosterInfo}>
-        <Text style={styles.rosterName}>{item.name}</Text>
-        <Text style={styles.rosterStats}>
-          SL {item.skill_level} · {item.matches_played} MP
-        </Text>
+    return (
+      <View style={styles.sideBySide}>
+        {/* Our column */}
+        <View style={styles.rosterColumn}>
+          <Text style={styles.columnHeader}>{ourLabel} (Us)</Text>
+          <ScrollView showsVerticalScrollIndicator={false} style={styles.columnScroll}>
+            {roster.map(p => {
+              const isTentative = tentativePlayerId === p.id && !ourConfirmedId;
+              const isConfirmed = ourConfirmedId === p.id;
+              return (
+                <Pressable
+                  key={p.id}
+                  style={[
+                    styles.sideRosterRow,
+                    isTentative && styles.rowTentative,
+                    isConfirmed && styles.rowConfirmed,
+                  ]}
+                  onPress={() => canSelect && !ourConfirmedId && selectPlayer(p.id)}
+                  disabled={!canSelect || !!ourConfirmedId || saving}
+                >
+                  <Text style={styles.sideRosterName} numberOfLines={1}>{p.name}</Text>
+                  <Text style={styles.sideRosterStats}>SL {p.skill_level} · {p.matches_played}MP</Text>
+                  {isTentative && (
+                    <Ionicons name="ellipse" size={10} color="#F59E0B" style={styles.rowIcon} />
+                  )}
+                  {isConfirmed && (
+                    <Ionicons name="checkmark-circle" size={14} color={theme.colors.primary} style={styles.rowIcon} />
+                  )}
+                </Pressable>
+              );
+            })}
+          </ScrollView>
+          {/* SL total + Confirm button */}
+          <View style={styles.columnFooter}>
+            <View style={styles.slTotalRow}>
+              <Text style={styles.slTotalLabel}>SL Total</Text>
+              <Text style={styles.slTotalValue}>{ourSLTotal}</Text>
+            </View>
+            {canSelect && !ourConfirmedId && tentativePlayerId && (
+              <Pressable
+                style={[styles.confirmButton, saving && styles.confirmButtonDisabled]}
+                onPress={confirmPlayer}
+                disabled={saving}
+              >
+                <Text style={styles.confirmButtonText}>{saving ? 'Saving…' : 'Confirm Player'}</Text>
+                <Ionicons name="checkmark" size={18} color="#FFFFFF" />
+              </Pressable>
+            )}
+          </View>
+        </View>
+
+        {/* Opponent column */}
+        <View style={styles.rosterColumn}>
+          <Text style={styles.columnHeader}>{oppLabel} (Them)</Text>
+          <ScrollView showsVerticalScrollIndicator={false} style={styles.columnScroll}>
+            {opponentRoster.length === 0 ? (
+              <Text style={styles.emptyRosterText}>Unavailable</Text>
+            ) : opponentRoster.map(p => {
+              const isTentative = opponentTentativeId === p.id && !oppConfirmedId;
+              const isConfirmed = oppConfirmedId === p.id;
+              return (
+                <View
+                  key={p.id}
+                  style={[
+                    styles.sideRosterRow,
+                    styles.sideRosterRowReadOnly,
+                    isTentative && styles.rowTentative,
+                    isConfirmed && styles.rowConfirmed,
+                  ]}
+                >
+                  <Text style={styles.sideRosterName} numberOfLines={1}>{p.name}</Text>
+                  <Text style={styles.sideRosterStats}>SL {p.skill_level} · {p.matches_played}MP</Text>
+                  {isTentative && (
+                    <Ionicons name="ellipse" size={10} color="#F59E0B" style={styles.rowIcon} />
+                  )}
+                  {isConfirmed && (
+                    <Ionicons name="checkmark-circle" size={14} color={theme.colors.success} style={styles.rowIcon} />
+                  )}
+                </View>
+              );
+            })}
+          </ScrollView>
+          <View style={styles.columnFooter}>
+            <View style={styles.slTotalRow}>
+              <Text style={styles.slTotalLabel}>SL Total</Text>
+              <Text style={styles.slTotalValue}>{oppSLTotal}</Text>
+            </View>
+          </View>
+        </View>
       </View>
-    </View>
-  );
+    );
+  };
 
   // ─── Render phase content ─────────────────────────────────────────────────
   const renderContent = () => {
@@ -527,188 +653,84 @@ export default function PutUpScreen() {
           </View>
         );
 
-      case 'we_put_up':
+      case 'ready':
         return (
-          <>
-            <View style={styles.promptCard}>
-              <Text style={styles.promptTitle}>Your Turn to Put Up</Text>
-              <Text style={styles.promptBody}>
-                Your team puts up first for Match {matchOrder}.{'\n'}
-                Select the player you are sending to the table.
-              </Text>
-            </View>
-            {/* Roster toggle — browse opponent roster for matchup context */}
-            <View style={styles.tabRow}>
-              <Pressable
-                style={[styles.tab, rosterTab === 'ours' && styles.tabActive]}
-                onPress={() => setRosterTab('ours')}
-              >
-                <Text style={[styles.tabText, rosterTab === 'ours' && styles.tabTextActive]}>
-                  Our Roster
-                </Text>
-              </Pressable>
-              <Pressable
-                style={[styles.tab, rosterTab === 'theirs' && styles.tabActive]}
-                onPress={() => setRosterTab('theirs')}
-              >
-                <Text style={[styles.tabText, rosterTab === 'theirs' && styles.tabTextActive]}>
-                  Their Roster
-                </Text>
-              </Pressable>
-            </View>
-            {rosterTab === 'ours' ? (
-              <>
-                <Text style={styles.rosterLabel}>Select your player:</Text>
-                <FlatList
-                  data={roster}
-                  keyExtractor={(item) => item.id}
-                  renderItem={renderRosterItem}
-                  contentContainerStyle={styles.listContent}
-                  showsVerticalScrollIndicator={false}
-                />
-              </>
-            ) : (
-              <>
-                <Text style={styles.rosterLabel}>Opponent roster (view only):</Text>
-                <FlatList
-                  data={opponentRoster}
-                  keyExtractor={(item) => item.id}
-                  renderItem={renderOpponentRosterItem}
-                  contentContainerStyle={styles.listContent}
-                  showsVerticalScrollIndicator={false}
-                  ListEmptyComponent={
-                    <Text style={styles.emptyRosterText}>Opponent roster unavailable</Text>
-                  }
-                />
-              </>
-            )}
-          </>
+          <View style={styles.centered}>
+            <Ionicons name="checkmark-circle" size={72} color={theme.colors.success} />
+            <Text style={styles.readyTitle}>Both Players Ready!</Text>
+            <Text style={styles.waitBody}>Starting Match {matchOrder}...</Text>
+          </View>
         );
 
       case 'they_putting':
         return (
-          <View style={styles.centered}>
-            <ActivityIndicator size="large" color={theme.colors.primary} />
-            <Text style={styles.waitTitle}>
-              {opponentConnected ? 'Opponent is choosing...' : 'Other team has not started the match'}
-            </Text>
-            <Text style={styles.waitBody}>
-              {opponentConnected
-                ? `Waiting for the other team to put up their player for Match ${matchOrder}.`
-                : 'Waiting for the other team to open the app and start the match.'}
-            </Text>
-          </View>
+          <>
+            <View style={styles.statusBanner}>
+              <ActivityIndicator size="small" color={theme.colors.primary} style={{ marginRight: 8 }} />
+              <Text style={styles.statusBannerText}>
+                {opponentConnected
+                  ? `Waiting for opponent to put up their player…`
+                  : 'Waiting for the other team to open the app…'}
+              </Text>
+            </View>
+            {renderSideBySideRosters(false)}
+          </>
+        );
+
+      case 'we_put_up':
+        return (
+          <>
+            <View style={[styles.statusBanner, styles.statusBannerActive]}>
+              <Ionicons name="hand-left-outline" size={18} color={theme.colors.primary} style={{ marginRight: 8 }} />
+              <Text style={[styles.statusBannerText, { color: theme.colors.primary }]}>
+                Your team puts up first for Match {matchOrder}. Tap a player, then confirm.
+              </Text>
+            </View>
+            {renderSideBySideRosters(true)}
+          </>
         );
 
       case 'we_respond':
         return (
           <>
-            <View style={styles.opponentCard}>
-              <Text style={styles.opponentLabel}>OPPONENT PUT UP</Text>
-              <Text style={styles.opponentName}>
-                {opponentPlayer?.name ?? '—'}
+            <View style={[styles.statusBanner, styles.statusBannerActive]}>
+              <Ionicons name="hand-left-outline" size={18} color={theme.colors.primary} style={{ marginRight: 8 }} />
+              <Text style={[styles.statusBannerText, { color: theme.colors.primary }]}>
+                {opponentPlayer?.name ?? 'Opponent'} is up. Choose your response player.
               </Text>
-              <View style={styles.statRow}>
-                <View style={styles.statChip}>
-                  <Text style={styles.statChipText}>
-                    SL {opponentPlayer?.skill_level ?? '—'}
-                  </Text>
-                </View>
-                <View style={styles.statChip}>
-                  <Text style={styles.statChipText}>
-                    {opponentPlayer?.matches_played ?? 0} MP
-                  </Text>
-                </View>
-              </View>
             </View>
-            {/* Roster toggle — browse opponent full roster for matchup context */}
-            <View style={styles.tabRow}>
-              <Pressable
-                style={[styles.tab, rosterTab === 'ours' && styles.tabActive]}
-                onPress={() => setRosterTab('ours')}
-              >
-                <Text style={[styles.tabText, rosterTab === 'ours' && styles.tabTextActive]}>
-                  Our Roster
-                </Text>
-              </Pressable>
-              <Pressable
-                style={[styles.tab, rosterTab === 'theirs' && styles.tabActive]}
-                onPress={() => setRosterTab('theirs')}
-              >
-                <Text style={[styles.tabText, rosterTab === 'theirs' && styles.tabTextActive]}>
-                  Their Roster
-                </Text>
-              </Pressable>
-            </View>
-            {rosterTab === 'ours' ? (
-              <>
-                <Text style={styles.rosterLabel}>Select your response player:</Text>
-                <FlatList
-                  data={roster}
-                  keyExtractor={(item) => item.id}
-                  renderItem={renderRosterItem}
-                  contentContainerStyle={styles.listContent}
-                  showsVerticalScrollIndicator={false}
-                />
-              </>
-            ) : (
-              <>
-                <Text style={styles.rosterLabel}>Opponent roster (view only):</Text>
-                <FlatList
-                  data={opponentRoster}
-                  keyExtractor={(item) => item.id}
-                  renderItem={renderOpponentRosterItem}
-                  contentContainerStyle={styles.listContent}
-                  showsVerticalScrollIndicator={false}
-                  ListEmptyComponent={
-                    <Text style={styles.emptyRosterText}>Opponent roster unavailable</Text>
-                  }
-                />
-              </>
-            )}
+            {renderSideBySideRosters(true)}
           </>
         );
 
       case 'we_waiting':
         return (
-          <View style={styles.centered}>
-            <ActivityIndicator size="large" color={theme.colors.primary} />
-            <Text style={styles.waitTitle}>
-              {opponentConnected ? 'Waiting for opponent...' : 'Other team has not started the match'}
-            </Text>
-            <Text style={styles.waitBody}>
-              You put up {ourPlayerName ?? 'your player'}.{'\n'}
-              {opponentConnected
-                ? 'Waiting for the other team to respond.'
-                : 'Waiting for the other team to open the app.'}
-            </Text>
-          </View>
-        );
-
-      case 'ready':
-        return (
-          <View style={styles.centered}>
-            <Ionicons
-              name="checkmark-circle"
-              size={72}
-              color={theme.colors.success}
-            />
-            <Text style={styles.readyTitle}>Both Players Ready!</Text>
-            <Text style={styles.waitBody}>Starting Match {matchOrder}...</Text>
-          </View>
+          <>
+            <View style={styles.statusBanner}>
+              <ActivityIndicator size="small" color={theme.colors.primary} style={{ marginRight: 8 }} />
+              <Text style={styles.statusBannerText}>
+                {opponentConnected
+                  ? `You put up ${ourPlayerName ?? 'your player'}. Waiting for opponent to respond…`
+                  : 'Waiting for the other team to open the app…'}
+              </Text>
+            </View>
+            {renderSideBySideRosters(false)}
+          </>
         );
     }
   };
 
   return (
     <SafeAreaView style={styles.safeArea} edges={['top']}>
+      <Stack.Screen options={{ gestureEnabled: false }} />
       <View style={styles.headerBar}>
         <Pressable
           style={styles.headerButton}
-          onPress={() => router.back()}
+          onPress={() => {}} // back locked during put-up
           hitSlop={12}
+          disabled
         >
-          <Ionicons name="arrow-back" size={24} color={theme.colors.text} />
+          <Ionicons name="arrow-back" size={24} color={theme.colors.border} />
         </Pressable>
         <Pressable style={styles.headerCenter} onPress={handleDevTap} hitSlop={8}>
           <Text style={styles.headerTitle}>Match {matchOrder} of 5</Text>
@@ -766,68 +788,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 32,
     gap: 16,
   },
-  // Prompt card (our turn to put up)
-  promptCard: {
-    margin: 20,
-    backgroundColor: theme.colors.surface,
-    borderRadius: 16,
-    padding: 20,
-    borderWidth: 1,
-    borderColor: theme.colors.primary + '50',
-  },
-  promptTitle: {
-    fontSize: 20,
-    fontWeight: '700',
-    color: theme.colors.primary,
-    marginBottom: 8,
-  },
-  promptBody: {
-    fontSize: 15,
-    color: theme.colors.textSecondary,
-    lineHeight: 22,
-  },
-  // Opponent player card
-  opponentCard: {
-    margin: 20,
-    backgroundColor: theme.colors.surface,
-    borderRadius: 16,
-    padding: 20,
-    borderWidth: 1,
-    borderColor: theme.colors.warning + '60',
-    alignItems: 'center',
-    gap: 8,
-  },
-  opponentLabel: {
-    fontSize: 11,
-    fontWeight: '700',
-    color: theme.colors.warning,
-    letterSpacing: 1.5,
-  },
-  opponentName: {
-    fontSize: 26,
-    fontWeight: '700',
-    color: theme.colors.text,
-    textAlign: 'center',
-  },
-  statRow: {
-    flexDirection: 'row',
-    gap: 10,
-    marginTop: 4,
-  },
-  statChip: {
-    backgroundColor: theme.colors.surfaceLight,
-    borderRadius: 8,
-    paddingHorizontal: 14,
-    paddingVertical: 6,
-    borderWidth: 1,
-    borderColor: theme.colors.border,
-  },
-  statChipText: {
-    fontSize: 15,
-    fontWeight: '700',
-    color: theme.colors.text,
-  },
-  // Roster list
+  // Roster list (offline fallback uses these)
   rosterLabel: {
     fontSize: 16,
     fontWeight: '700',
@@ -850,10 +811,6 @@ const styles = StyleSheet.create({
     borderColor: theme.colors.border,
     minHeight: 64,
   },
-  rowPressed: {
-    opacity: 0.85,
-    backgroundColor: theme.colors.surfaceLight,
-  },
   rosterInfo: {
     flex: 1,
     gap: 4,
@@ -868,12 +825,125 @@ const styles = StyleSheet.create({
     color: theme.colors.textSecondary,
     fontWeight: '500',
   },
-  // Waiting states
-  waitTitle: {
-    fontSize: 20,
+  // Status banner (above side-by-side rosters)
+  statusBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginHorizontal: 12,
+    marginBottom: 8,
+    marginTop: 4,
+    backgroundColor: theme.colors.surface,
+    borderRadius: 10,
+    padding: 12,
+    borderWidth: 1,
+    borderColor: theme.colors.border,
+  },
+  statusBannerActive: {
+    borderColor: theme.colors.primary + '50',
+    backgroundColor: theme.colors.primary + '08',
+  },
+  statusBannerText: {
+    flex: 1,
+    fontSize: 13,
+    color: theme.colors.textSecondary,
+    lineHeight: 18,
+  },
+  // Side-by-side roster layout
+  sideBySide: {
+    flex: 1,
+    flexDirection: 'row',
+    paddingHorizontal: 8,
+    gap: 6,
+  },
+  rosterColumn: {
+    flex: 1,
+    flexDirection: 'column',
+  },
+  columnHeader: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: theme.colors.textSecondary,
+    textAlign: 'center',
+    letterSpacing: 0.5,
+    marginBottom: 6,
+    textTransform: 'uppercase',
+  },
+  columnScroll: {
+    flex: 1,
+  },
+  columnFooter: {
+    paddingTop: 6,
+    paddingBottom: 8,
+    gap: 6,
+  },
+  sideRosterRow: {
+    backgroundColor: theme.colors.surface,
+    borderRadius: 8,
+    padding: 10,
+    marginBottom: 4,
+    borderWidth: 1,
+    borderColor: theme.colors.border,
+    minHeight: 52,
+    justifyContent: 'center',
+  },
+  sideRosterRowReadOnly: {
+    opacity: 0.85,
+  },
+  sideRosterName: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: theme.colors.text,
+  },
+  sideRosterStats: {
+    fontSize: 11,
+    color: theme.colors.textSecondary,
+    fontWeight: '500',
+    marginTop: 2,
+  },
+  rowTentative: {
+    borderColor: '#F59E0B',
+    backgroundColor: '#F59E0B12',
+  },
+  rowConfirmed: {
+    borderColor: theme.colors.primary,
+    backgroundColor: theme.colors.primary + '15',
+  },
+  rowIcon: {
+    marginTop: 4,
+  },
+  slTotalRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingHorizontal: 4,
+  },
+  slTotalLabel: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: theme.colors.textSecondary,
+  },
+  slTotalValue: {
+    fontSize: 16,
     fontWeight: '700',
     color: theme.colors.text,
-    textAlign: 'center',
+  },
+  confirmButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    backgroundColor: theme.colors.primary,
+    borderRadius: 8,
+    paddingVertical: 10,
+    minHeight: 40,
+  },
+  confirmButtonDisabled: {
+    opacity: 0.5,
+  },
+  confirmButtonText: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#FFFFFF',
   },
   waitBody: {
     fontSize: 15,
@@ -933,36 +1003,6 @@ const styles = StyleSheet.create({
     fontSize: 17,
     fontWeight: '700',
     color: '#FFFFFF',
-  },
-  // Roster toggle tabs
-  tabRow: {
-    flexDirection: 'row',
-    marginHorizontal: 20,
-    marginBottom: 4,
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: theme.colors.border,
-    overflow: 'hidden',
-  },
-  tab: {
-    flex: 1,
-    paddingVertical: 10,
-    alignItems: 'center',
-    backgroundColor: theme.colors.surface,
-  },
-  tabActive: {
-    backgroundColor: theme.colors.primary + '18',
-  },
-  tabText: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: theme.colors.textSecondary,
-  },
-  tabTextActive: {
-    color: theme.colors.primary,
-  },
-  rosterRowReadOnly: {
-    opacity: 0.75,
   },
   emptyRosterText: {
     textAlign: 'center',

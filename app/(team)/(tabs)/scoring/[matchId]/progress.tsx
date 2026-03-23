@@ -58,7 +58,7 @@ export default function MatchProgressScreen() {
       const { data: tm } = await supabase
         .from('team_matches')
         .select(
-          'put_up_team, home_team_id, away_team_id, ' +
+          'first_put_up_team, home_team_id, away_team_id, ' +
           'home_team:teams!home_team_id(name), away_team:teams!away_team_id(name)'
         )
         .eq('id', matchId)
@@ -73,9 +73,10 @@ export default function MatchProgressScreen() {
         .from('individual_matches')
         .select(
           'id, match_order, home_player_id, away_player_id, ' +
+          'home_skill_level, away_skill_level, ' +
           'home_race_to, away_race_to, home_points_earned, away_points_earned, ' +
-          'home_player:players!home_player_id(first_name, last_name, skill_level), ' +
-          'away_player:players!away_player_id(first_name, last_name, skill_level)'
+          'home_player:players!home_player_id(first_name, last_name), ' +
+          'away_player:players!away_player_id(first_name, last_name)'
         )
         .eq('team_match_id', matchId)
         .order('match_order', { ascending: true });
@@ -84,7 +85,7 @@ export default function MatchProgressScreen() {
 
       // Build all 5 slots; track the loser of each completed match to determine
       // who puts up first for the next slot.
-      const firstPutUp: Side = ((tm as any).put_up_team ?? 'home') as Side;
+      const firstPutUp: Side = ((tm as any).first_put_up_team ?? 'home') as Side;
       let nextPutUpTeam: Side = firstPutUp;
       const built: MatchSlot[] = [];
 
@@ -133,8 +134,8 @@ export default function MatchProgressScreen() {
           individualMatchId: row.id,
           homePlayerName: homeName,
           awayPlayerName: awayName,
-          homeSL: row.home_player?.skill_level ?? null,
-          awaySL: row.away_player?.skill_level ?? null,
+          homeSL: row.home_skill_level ?? null,
+          awaySL: row.away_skill_level ?? null,
           homePoints: hp,
           awayPoints: ap,
           homeRaceTo: hr,

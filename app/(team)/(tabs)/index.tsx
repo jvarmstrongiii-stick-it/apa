@@ -1,12 +1,11 @@
 import { useState, useCallback, useEffect } from 'react';
-import { ActivityIndicator, Alert, Modal, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, Alert, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router, useFocusEffect } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { theme } from '../../../src/constants/theme';
 import { useAuthContext } from '../../../src/providers/AuthProvider';
 import { supabase } from '../../../src/lib/supabase';
-import { CoinFlipModal, CoinFlipResult } from '../../../src/components/CoinFlipModal';
 import { BroadcastCard, BroadcastThreadMessage } from '../../../src/components/BroadcastCard';
 
 interface TeamData {
@@ -56,8 +55,6 @@ export default function TeamDashboard() {
     seasonRecord: { totalPoints: 0, pointsAgainst: 0, matchesPlayed: 0, matchesRemaining: 0 },
   });
   const [isLoading, setIsLoading] = useState(true);
-  const [coinFlipVisible, setCoinFlipVisible] = useState(false);
-  const [waitingVisible, setWaitingVisible] = useState(false);
   const [broadcasts, setBroadcasts] = useState<Broadcast[]>([]);
   const [broadcastReplies, setBroadcastReplies] = useState<Record<string, string>>({});
   const [broadcastThreads, setBroadcastThreads] = useState<Record<string, BroadcastThreadMessage[]>>({});
@@ -241,31 +238,6 @@ export default function TeamDashboard() {
     return () => { channel.unsubscribe(); };
   }, [userId]);
 
-  // Away team: subscribe to individual_matches INSERT while waiting for coin flip
-  useEffect(() => {
-    if (!waitingVisible || !teamData.nextMatch) return;
-    const matchId = teamData.nextMatch.id;
-
-    const channel = supabase
-      .channel(`waiting_coinflip_dash_${matchId}`)
-      .on(
-        'postgres_changes',
-        {
-          event: 'INSERT',
-          schema: 'public',
-          table: 'individual_matches',
-          filter: `team_match_id=eq.${matchId}`,
-        },
-        () => {
-          setWaitingVisible(false);
-          router.push(`/(team)/(tabs)/scoring/${matchId}/progress`);
-        }
-      )
-      .subscribe();
-
-    return () => { supabase.removeChannel(channel); };
-  }, [waitingVisible, teamData.nextMatch]);
-
   // Broadcast handlers
   const handleBroadcastReply = useCallback(async (broadcastId: string, text: string) => {
     if (!userId || !teamId) return;
@@ -327,22 +299,6 @@ export default function TeamDashboard() {
     );
   }
 
-  const handleCoinFlipReady = (result: CoinFlipResult) => {
-    setCoinFlipVisible(false);
-    const match = teamData.nextMatch;
-    if (!match) return;
-
-    if (result.firstMatch) {
-      const putUpTeam =
-        result.ourTeamPutsUpFirst === match.isHome ? 'home' : 'away';
-      router.push(
-        `/(team)/(tabs)/scoring/${match.id}/putup?matchOrder=1&putUpTeam=${putUpTeam}`
-      );
-    } else {
-      router.push(`/(team)/(tabs)/scoring/${match.id}/resume`);
-    }
-  };
-
   const handleLogout = () => {
     Alert.alert('Log Out', 'Log out and return to the login screen?', [
       { text: 'Cancel', style: 'cancel' },
@@ -359,35 +315,6 @@ export default function TeamDashboard() {
 
   return (
     <SafeAreaView style={styles.safeArea} edges={['top']}>
-      <CoinFlipModal visible={coinFlipVisible} onReady={handleCoinFlipReady} onCancel={() => setCoinFlipVisible(false)} />
-
-      {/* Away team waiting modal — shown while home team does the coin flip */}
-      <Modal visible={waitingVisible} transparent animationType="fade">
-        <View style={styles.waitingOverlay}>
-          <View style={styles.waitingCard}>
-            <Text style={styles.waitingTitle}>Waiting for Coin Flip</Text>
-            {teamData.nextMatch && (
-              <Text style={styles.waitingOpponent}>vs {teamData.nextMatch.opponent}</Text>
-            )}
-            <Text style={styles.waitingBody}>
-              The home team is flipping the coin to decide who puts up first.
-              This screen will update automatically when they are ready.
-            </Text>
-            <ActivityIndicator
-              size="large"
-              color={theme.colors.primary}
-              style={styles.waitingSpinner}
-            />
-            <Pressable
-              style={styles.waitingCancel}
-              onPress={() => setWaitingVisible(false)}
-            >
-              <Text style={styles.waitingCancelText}>Cancel</Text>
-            </Pressable>
-          </View>
-        </View>
-      </Modal>
-
       <ScrollView
         style={styles.scrollView}
         contentContainerStyle={styles.scrollContent}
@@ -471,22 +398,26 @@ export default function TeamDashboard() {
               </View>
             </View>
 
-            {/* Score Match Button — home team does coin flip; away team waits */}
+            {/* Score Match Button — navigates both teams to coin flip screen */}
             <Pressable
               style={({ pressed }) => [
                 styles.scoreMatchButton,
                 pressed && styles.buttonPressed,
               ]}
               onPress={() => {
-                if (teamData.nextMatch?.isHome) {
-                  setCoinFlipVisible(true);
+                const match = teamData.nextMatch;
+                if (!match) return;
+                if (match.status === 'in_progress') {
+                  router.push(`/(team)/(tabs)/scoring/${match.id}/progress`);
                 } else {
-                  setWaitingVisible(true);
+                  router.push(`/(team)/(tabs)/scoring/${match.id}/coin-flip`);
                 }
               }}
             >
               <Ionicons name="create" size={22} color="#FFFFFF" />
-              <Text style={styles.scoreMatchButtonText}>Score Match</Text>
+              <Text style={styles.scoreMatchButtonText}>
+                {teamData.nextMatch?.status === 'in_progress' ? 'Continue Scoring' : 'Score Match'}
+              </Text>
             </Pressable>
 
             {/* Show when multiple upcoming matches exist */}
@@ -787,51 +718,5 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: '600',
     color: theme.colors.text,
-  },
-  waitingOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.6)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    padding: 24,
-  },
-  waitingCard: {
-    backgroundColor: theme.colors.surface,
-    borderRadius: 20,
-    padding: 32,
-    width: '100%',
-    maxWidth: 360,
-    alignItems: 'center',
-    gap: 12,
-  },
-  waitingTitle: {
-    fontSize: 22,
-    fontWeight: '700',
-    color: theme.colors.text,
-    textAlign: 'center',
-  },
-  waitingOpponent: {
-    fontSize: 15,
-    fontWeight: '600',
-    color: theme.colors.primary,
-    textAlign: 'center',
-  },
-  waitingBody: {
-    fontSize: 15,
-    color: theme.colors.textSecondary,
-    textAlign: 'center',
-    lineHeight: 22,
-  },
-  waitingSpinner: {
-    marginVertical: 8,
-  },
-  waitingCancel: {
-    paddingVertical: 10,
-    paddingHorizontal: 24,
-  },
-  waitingCancelText: {
-    fontSize: 16,
-    color: theme.colors.textSecondary,
-    fontWeight: '500',
   },
 });

@@ -1,5 +1,5 @@
 # Pool League Scoring App — Working Specification
-**Living Document | Updated 2026-03-21**
+**Living Document | Updated 2026-03-22**
 
 ---
 
@@ -201,6 +201,9 @@ Written by PDF import whenever a player's SL changes or they are first seen. `ol
 | home_score / away_score | integer | Team-level APA points |
 | locked_by / locked_at | uuid / timestamptz | |
 | finalized_by / finalized_at | uuid / timestamptz | |
+| coin_flip_done | boolean | DEFAULT false; set true when coin flip ceremony completes |
+| first_put_up_team | text | 'home' \| 'away'; team that puts up first (decided by coin flip winner) |
+| coin_flip_winner | text | 'home' \| 'away'; team that won the coin flip (chose put-up or defer) |
 
 ### lineups
 | Column | Type | Notes |
@@ -226,6 +229,7 @@ Written by PDF import whenever a player's SL changes or they are first seen. `ol
 | home_race_to / away_race_to | integer | From race chart |
 | home_points_earned / away_points_earned | integer | Racks won |
 | put_up_team | text | 'home' \| 'away' |
+| lag_winner | text | 'home' \| 'away'; written when lag screen is completed; used to restore `breakPlayer` on resume |
 | resumed_at | timestamptz | Written on resume |
 | innings | integer | Total innings for match |
 | defensive_shots | integer | |
@@ -375,18 +379,27 @@ Legend: **✅ BUILT** | **🔶 PARTIAL** | **❌ NOT STARTED**
 ### Scorekeeping — Match Start
 | Feature | Status | Notes |
 |---|---|---|
-| Coin flip modal (first match / not first) | ✅ BUILT | Steps: first_match → flip → result → accept/defer; Cancel button on every step |
+| Coin flip screen (two-device Realtime) | ✅ BUILT | Dedicated route `scoring/[matchId]/coin-flip`; Supabase Realtime broadcast + Presence; Home sends `home_ready` on subscribe, Away waits in `waiting_for_home` phase; writes `coin_flip_done`, `first_put_up_team`, `coin_flip_winner` to `team_matches` |
+| Coin flip — race condition guard | ✅ BUILT | Away's H/T buttons locked until Home is detected via Presence (`home_ready` broadcast); prevents Away choosing before Home is on screen |
+| Coin flip — navigation lock | ✅ BUILT | Android back button blocked (`BackHandler`); iOS swipe-back disabled (`gestureEnabled: false`); only exit is Cancel button |
+| Coin flip — Cancel confirmation alert | ✅ BUILT | Alert warns "This will cancel the match for both scorekeepers"; broadcasts `cancel` event to both devices |
 | Catchup wizard (starting mid-match) | ✅ BUILT | Retroactive data entry for prior matches |
 | Catchup: select starting match (1–5) | ✅ BUILT | Fresh match defaults to match 1 (skips select screen) |
 | Catchup: retro player + winner + racks | ✅ BUILT | |
 | Catchup: partial racks on starting match | ✅ BUILT | |
 | Catchup saves to DB (23-rule consistent) | ✅ BUILT | Upserts individual_matches |
-| Put-up screen (Realtime two-device) | ✅ BUILT | Supabase Realtime `postgres_changes` |
+| Put-up screen (Realtime two-device) | ✅ BUILT | Supabase Realtime `postgres_changes` + broadcast; side-by-side rosters with SL totals; tentative selection (broadcast) + Confirm (DB write) |
+| Put-up — tentative selection | ✅ BUILT | Tap player → yellow border + broadcast to opponent; Confirm button writes to DB; opponent's tentative shown in their column |
+| Put-up — SL totals | ✅ BUILT | Running total of skill levels per team across completed matches + current selection; shown in roster footer |
+| Put-up — navigation lock | ✅ BUILT | Android back dimmed/blocked; iOS swipe-back disabled |
 | Put-up offline fallback | ✅ BUILT | 10s Realtime timeout → manual player picker from roster; writes both player IDs and sets match in_progress |
 | "Other team not started" message | ✅ BUILT | `opponentConnected` flag |
 | Dev bypass (triple-tap title, solo testing) | ✅ BUILT | Hidden; auto-fills two different players; sets skill levels on individual_match |
 | Stale put-up self-heal | ✅ BUILT | If team_match.status='scheduled' and individual_match already has both players, clears them on load |
 | Resume screen (select in-progress match) | ✅ BUILT | Shows all 5 slots, status, last resumed time |
+| Match Progress screen (5-slot overview) | ✅ BUILT | `scoring/[matchId]/progress`; tapping needs_putup → put-up; tapping in_progress → scoring |
+| Continue Scoring — dynamic button label | ✅ BUILT | Dashboard "Score Match" reads "Continue Scoring" when session `status = in_progress` |
+| Lag winner restore on resume | ✅ BUILT | `individual_matches.lag_winner` (DB) seeds `breakPlayer` when device has no local scoring state, preventing re-display of lag screen |
 | Reset Match (dev/testing tool) | ✅ BUILT | On scoring index match card; deletes individual_matches + resets team_match to scheduled; only shown for non-scheduled matches |
 
 ### Scorekeeping — Active Match
@@ -482,7 +495,7 @@ Legend: **✅ BUILT** | **🔶 PARTIAL** | **❌ NOT STARTED**
 | **TEAM** | | | |
 | Team Dashboard | `/(team)/(tabs)/` | ✅ BUILT | Next match, season summary, quick actions, logout |
 | Scoring Index | `/(team)/(tabs)/scoring` | ✅ BUILT | Scorable match list |
-| Coin Flip Modal | component | ✅ BUILT | Used by dashboard + scoring index |
+| Coin Flip | `/(team)/(tabs)/scoring/[matchId]/coin-flip` | ✅ BUILT | Two-device Realtime ceremony; Presence + broadcast; writes coin_flip_winner + first_put_up_team |
 | APA Rules Assistant | component (global) | ✅ BUILT | Floating 🎱 FAB + slide-up chat panel; mounted in root layout |
 | Catchup Wizard | `/(team)/(tabs)/scoring/[matchId]/catchup` | ✅ BUILT | Retroactive data entry |
 | Put Up | `/(team)/(tabs)/scoring/[matchId]/putup` | ✅ BUILT | Realtime two-device |

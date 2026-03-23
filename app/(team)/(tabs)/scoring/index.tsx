@@ -1,9 +1,7 @@
-import { useState, useCallback, useRef, useEffect } from 'react';
+import { useState, useCallback } from 'react';
 import {
-  ActivityIndicator,
   Alert,
   FlatList,
-  Modal,
   Pressable,
   StyleSheet,
   Text,
@@ -15,7 +13,6 @@ import { Ionicons } from '@expo/vector-icons';
 import { theme } from '../../../../src/constants/theme';
 import { supabase } from '../../../../src/lib/supabase';
 import { useAuthContext } from '../../../../src/providers/AuthProvider';
-import { CoinFlipModal } from '../../../../src/components/CoinFlipModal';
 import { flushPendingWrites, getPendingMatchIds } from '../../../../src/lib/pendingWrites';
 
 type ScorableStatus = 'scheduled' | 'lineup_set' | 'in_progress';
@@ -59,7 +56,7 @@ function ScorableMatchItem({
 }: {
   match: ScorableMatch;
   hasPending: boolean;
-  onScheduledPress: (matchId: string, isHome: boolean) => void;
+  onScheduledPress: (matchId: string) => void;
   onResetPress: (matchId: string) => void;
 }) {
   const handleFollowPress = () => {
@@ -71,7 +68,7 @@ function ScorableMatchItem({
   const handlePress = () => {
     switch (match.status) {
       case 'scheduled':
-        onScheduledPress(match.id, match.is_home);
+        onScheduledPress(match.id);
         break;
       case 'lineup_set':
         router.push(`/(team)/(tabs)/scoring/${match.id}/0`);
@@ -195,46 +192,10 @@ export default function TeamScoringIndex() {
   const [matches, setMatches] = useState<ScorableMatch[]>([]);
   const [refreshing, setRefreshing] = useState(false);
   const [pendingMatchIds, setPendingMatchIds] = useState<Set<string>>(new Set());
-  const [coinFlipVisible, setCoinFlipVisible] = useState(false);
-  const [waitingMatchId, setWaitingMatchId] = useState<string | null>(null);
-  const pendingMatchId = useRef<string | null>(null);
-  const pendingIsHome = useRef<boolean>(true);
 
-  const handleScheduledPress = (matchId: string, isHome: boolean) => {
-    if (isHome) {
-      pendingMatchId.current = matchId;
-      pendingIsHome.current = isHome;
-      setCoinFlipVisible(true);
-    } else {
-      setWaitingMatchId(matchId);
-    }
+  const handleScheduledPress = (matchId: string) => {
+    router.push(`/(team)/(tabs)/scoring/${matchId}/coin-flip`);
   };
-
-  // Away team: subscribe to individual_matches INSERT for the match we're waiting on.
-  // When the home team's putup screen creates the first row, auto-navigate to progress.
-  useEffect(() => {
-    if (!waitingMatchId) return;
-    const matchId = waitingMatchId;
-
-    const channel = supabase
-      .channel(`waiting_coinflip_${matchId}`)
-      .on(
-        'postgres_changes',
-        {
-          event: 'INSERT',
-          schema: 'public',
-          table: 'individual_matches',
-          filter: `team_match_id=eq.${matchId}`,
-        },
-        () => {
-          setWaitingMatchId(null);
-          router.push(`/(team)/(tabs)/scoring/${matchId}/progress`);
-        }
-      )
-      .subscribe();
-
-    return () => { supabase.removeChannel(channel); };
-  }, [waitingMatchId]);
 
   const handleResetMatch = (matchId: string) => {
     Alert.alert(
@@ -256,25 +217,6 @@ export default function TeamScoringIndex() {
         },
       ]
     );
-  };
-
-  const handleCoinFlipReady = (result: { firstMatch: boolean; ourTeamPutsUpFirst: boolean | null }) => {
-    setCoinFlipVisible(false);
-    const matchId = pendingMatchId.current;
-    const isHome = pendingIsHome.current;
-    pendingMatchId.current = null;
-    if (!matchId) return;
-
-    if (result.firstMatch) {
-      const putUpTeam =
-        result.ourTeamPutsUpFirst === isHome ? 'home' : 'away';
-      // Go through catchup wizard first — handles "starting mid-match" case
-      router.push(
-        `/(team)/(tabs)/scoring/${matchId}/catchup?putUpTeam=${putUpTeam}`
-      );
-    } else {
-      router.push(`/(team)/(tabs)/scoring/${matchId}/resume`);
-    }
   };
 
   const fetchScorableMatches = useCallback(async () => {
@@ -335,39 +277,8 @@ export default function TeamScoringIndex() {
     }
   };
 
-  const waitingMatch = matches.find(m => m.id === waitingMatchId);
-
   return (
     <SafeAreaView style={styles.safeArea} edges={['top']}>
-      <CoinFlipModal visible={coinFlipVisible} onReady={handleCoinFlipReady} onCancel={() => setCoinFlipVisible(false)} />
-
-      {/* Away team waiting modal — shown while home team does the coin flip */}
-      <Modal visible={waitingMatchId !== null} transparent animationType="fade">
-        <View style={styles.waitingOverlay}>
-          <View style={styles.waitingCard}>
-            <Text style={styles.waitingTitle}>Waiting for Coin Flip</Text>
-            {waitingMatch && (
-              <Text style={styles.waitingOpponent}>vs {waitingMatch.opponent_name}</Text>
-            )}
-            <Text style={styles.waitingBody}>
-              The home team is flipping the coin to decide who puts up first.
-              This screen will update automatically when they are ready.
-            </Text>
-            <ActivityIndicator
-              size="large"
-              color={theme.colors.primary}
-              style={styles.waitingSpinner}
-            />
-            <Pressable
-              style={styles.waitingCancel}
-              onPress={() => setWaitingMatchId(null)}
-            >
-              <Text style={styles.waitingCancelText}>Cancel</Text>
-            </Pressable>
-          </View>
-        </View>
-      </Modal>
-
       <View style={styles.headerBar}>
         <Text style={styles.headerTitle}>Scoring</Text>
       </View>
@@ -580,52 +491,6 @@ const styles = StyleSheet.create({
   resetButtonText: {
     fontSize: 13,
     color: '#F44336',
-    fontWeight: '500',
-  },
-  waitingOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.6)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    padding: 24,
-  },
-  waitingCard: {
-    backgroundColor: theme.colors.surface,
-    borderRadius: 20,
-    padding: 32,
-    width: '100%',
-    maxWidth: 360,
-    alignItems: 'center',
-    gap: 12,
-  },
-  waitingTitle: {
-    fontSize: 22,
-    fontWeight: '700',
-    color: theme.colors.text,
-    textAlign: 'center',
-  },
-  waitingOpponent: {
-    fontSize: 15,
-    fontWeight: '600',
-    color: theme.colors.primary,
-    textAlign: 'center',
-  },
-  waitingBody: {
-    fontSize: 15,
-    color: theme.colors.textSecondary,
-    textAlign: 'center',
-    lineHeight: 22,
-  },
-  waitingSpinner: {
-    marginVertical: 8,
-  },
-  waitingCancel: {
-    paddingVertical: 10,
-    paddingHorizontal: 24,
-  },
-  waitingCancelText: {
-    fontSize: 16,
-    color: theme.colors.textSecondary,
     fontWeight: '500',
   },
 });
