@@ -1,5 +1,5 @@
 # Pool League Scoring App — Working Specification
-**Living Document | Updated 2026-03-22**
+**Living Document | Updated 2026-04-02**
 
 ---
 
@@ -74,7 +74,7 @@ Three user roles: **Team** (scorekeepers, anonymous auth), **LO** (League Operat
 - Dashboard: Switch User (→ player login) | Log Out (→ admin login)
 
 ### Login Flow (3 steps) — Team side
-1. **Pick**: "Continue as Player" (team picker, plain list from scheduled matches only) | "League Operator Login"
+1. **Pick**: "Continue as Player" (team picker — teams with any active match: `scheduled`, `lineup_set`, or `in_progress`) | "League Operator Login"
 2. **Confirm**: "You selected [team]?" → Yes / Change Team
 3. **Who Are You?**: roster picker — player selects their own name; sets `profiles.player_id` + stores identity in SecureStore. Returning users see "Continue as [Name]?" with Yes / Not Me options.
 
@@ -233,6 +233,8 @@ Written by PDF import whenever a player's SL changes or they are first seen. `ol
 | resumed_at | timestamptz | Written on resume |
 | innings | integer | Total innings for match |
 | defensive_shots | integer | |
+| timeouts_home | integer | Cumulative timeouts used by home player; written at match end |
+| timeouts_away | integer | Cumulative timeouts used by away player; written at match end |
 | is_completed | boolean | DEFAULT false |
 | completed_at | timestamptz | |
 | innings_verify_home | integer | Primary scorer's submitted count (NULL when idle) |
@@ -365,7 +367,7 @@ Legend: **✅ BUILT** | **🔶 PARTIAL** | **❌ NOT STARTED**
 ### Captain — Roster Management
 | Feature | Status | Notes |
 |---|---|---|
-| Roster screen (view) | ✅ BUILT | Sorted captain-first then by SL desc; captain badge; "(You)" label on own card |
+| Roster screen (view) | ✅ BUILT | Sorted captain-first then by SL desc; captain badge (displayed below player name, left-aligned); "(You)" label on own card |
 | Edit mode (captain-only) | ✅ BUILT | Edit button in header; gated by `isCaptain` from auth context |
 | Remove player from roster | ✅ BUILT | Soft-delete: sets `team_players.left_at`; confirmation alert; cannot remove self |
 | Promote / demote co-captain | ✅ BUILT | Star toggle per player card in edit mode; confirmation alert |
@@ -379,6 +381,7 @@ Legend: **✅ BUILT** | **🔶 PARTIAL** | **❌ NOT STARTED**
 ### Scorekeeping — Match Start
 | Feature | Status | Notes |
 |---|---|---|
+| Lineup screen (pre-match lineup entry) | ✅ BUILT | `scoring/[matchId]/lineup`; captain selects 5 players + sets put-up order; 23-rule enforced with warn-and-override (not hard block); writes to `lineups` table; transitions match to `lineup_set`; navigates directly to scoring (match 1). Accessible from scoring index on `scheduled` matches after coin flip. |
 | Coin flip screen (two-device Realtime) | ✅ BUILT | Dedicated route `scoring/[matchId]/coin-flip`; Supabase Realtime broadcast + Presence; Home sends `home_ready` on subscribe, Away waits in `waiting_for_home` phase; writes `coin_flip_done`, `first_put_up_team`, `coin_flip_winner` to `team_matches` |
 | Coin flip — race condition guard | ✅ BUILT | Away's H/T buttons locked until Home is detected via Presence (`home_ready` broadcast); prevents Away choosing before Home is on screen |
 | Coin flip — navigation lock | ✅ BUILT | Android back button blocked (`BackHandler`); iOS swipe-back disabled (`gestureEnabled: false`); only exit is Cancel button |
@@ -424,6 +427,8 @@ Legend: **✅ BUILT** | **🔶 PARTIAL** | **❌ NOT STARTED**
 | Rack dots scoreboard | ✅ BUILT | |
 | Defensive shot tracking | ✅ BUILT | |
 | Break & Run / 8 on Break flags | ✅ BUILT | |
+| Scoreboard summary (post-match) | ✅ BUILT | `scoring/[matchId]/scoreboard`; APA-style card per individual match: player names, points, innings, defensive shots, timeouts, lag winner badge; accessible from finalize (after lock); tapping a card navigates to per-rack detail |
+| Scoreboard per-match detail | ✅ BUILT | `scoring/[matchId]/scoreboard/[individualMatchIndex]`; rack-by-rack W/L badges with B&R / 8-on-break flags; stats table: innings, timeouts, defensive shots |
 | Scorecard sessions (pessimistic locking) | ❌ NOT STARTED | Table exists; not wired into app |
 | 9-ball scoring (ball-by-ball) | ❌ NOT STARTED | Format detected; rack tables exist; UI not built |
 
@@ -446,6 +451,26 @@ Legend: **✅ BUILT** | **🔶 PARTIAL** | **❌ NOT STARTED**
 | UNLOCK (type "UNLOCK") | ✅ BUILT | Sets status back to 'in_progress' |
 | Incomplete match warning | ✅ BUILT | |
 
+### LO Broadcasts
+| Feature | Status | Notes |
+|---|---|---|
+| Broadcasts DB schema | ✅ BUILT | `broadcasts`, `broadcast_replies`, `broadcast_dismissals`, `broadcast_reads`, `broadcast_thread_messages` tables; RLS; Realtime publications; migration 00026 |
+| LO compose + send | ✅ BUILT | `app/(admin)/broadcasts.tsx`; compose modal with message/poll type, reply type (none/text/options), expiry, audience |
+| Audience targeting — multi-select + intersection | ✅ BUILT | `audience_type text[]` (migration 00029); chips for All Teams, Captains, 8-Ball, 9-Ball, Teams, Players; tapping multiple chips targets their intersection (e.g. Captains + 8-Ball = captains on 8-ball teams only); "All Teams" resets to single-select |
+| Audience targeting — specific teams | ✅ BUILT | Teams chip fetches all active teams; filter-as-you-type list; selected teams shown as removable tags; team IDs stored in `audience_ids` |
+| Audience targeting — specific players | ✅ BUILT | Players chip reveals search by first name, last name, or member number (debounced 300ms, limit 10); selected players shown as removable tags; player IDs stored in `audience_ids` |
+| Player-side audience filter | ✅ BUILT | `app/(team)/(tabs)/index.tsx`; intersection logic — player must match ALL selected categories; `eight_ball`/`nine_ball` resolved via team's `game_format` from `team_matches`; `players` checks `profile.player_id` against `audience_ids`; backward-compat with legacy scalar `audience_type` |
+| Player dashboard broadcast cards | ✅ BUILT | `src/components/BroadcastCard.tsx`; message and poll cards; reply (text or options); dismiss |
+| Broadcast reply (player → LO) | ✅ BUILT | Stored in `broadcast_replies`; one reply per player per broadcast; reply card hidden after reply unless LO has sent a thread message |
+| Two-way thread messaging | ✅ BUILT | LO replies to individual player replies via `broadcast_thread_messages`; player sees LO reply and can respond; thread continues |
+| Reply sender attribution | ✅ BUILT | LO admin shows "Team Name · First Last" on reply card and "Message First Last" button; uses explicit FK hints `teams!team_id` and `players!player_id` in Supabase select to handle stale schema cache |
+| LO reply visible on re-login | ✅ BUILT | `fetchBroadcasts` extracted from `fetchDashboard`; broadcast cards with unread LO thread replies remain visible even after player replied (filtered by `is_from_lo && !is_read`); Realtime LO thread INSERT triggers `fetchBroadcasts()` so card reappears live |
+| Archived broadcasts hidden from players | ✅ BUILT | RLS (`team_read_active_broadcasts`) gates on `is_archived=false`; Realtime UPDATE handler removes card live when LO archives |
+| Poll close / broadcast lifecycle | ✅ BUILT | Closed (`closed_at` set) = no more replies but card stays visible; Archived (`is_archived=true`) = fully removed from player view |
+| Duplicate reply guard | ✅ BUILT | Frontend dedup by `msg.id` before render + dedup when building `threads` map from initial fetch; Realtime new-reply handler calls `fetchBroadcasts()` instead of patching with null-joined data |
+| Seen-by modal | ✅ BUILT | LO views which teams have read a broadcast |
+| Archive / close / resend | ✅ BUILT | LO actions on each broadcast card |
+
 ### Admin/LO — Disputes
 | Feature | Status | Notes |
 |---|---|---|
@@ -456,12 +481,12 @@ Legend: **✅ BUILT** | **🔶 PARTIAL** | **❌ NOT STARTED**
 ### APA Rules Assistant
 | Feature | Status | Notes |
 |---|---|---|
-| Floating 🎱 FAB (all screens) | ✅ BUILT | `src/components/RulesAssistant.tsx`; absolute overlay, above tab bar |
+| Floating 🎱 FAB (authenticated screens only) | ✅ BUILT | `src/components/RulesAssistant.tsx`; hidden until player has completed full login (team + name confirmed: `isAuthenticated && profile.player_id` for team role; `isAuthenticated` for LO/admin); also guards `!role` so FAB stays hidden during the brief anonymous-sign-in window before profile loads |
 | Chat panel (slide-up modal) | ✅ BUILT | Chip shortcuts, message bubbles, proof + audit buttons |
 | Anthropic API integration | ✅ BUILT | `claude-opus-4-6`; key in `.env` as `EXPO_PUBLIC_ANTHROPIC_KEY` |
 | Quick question chips (wrapped rows) | ✅ BUILT | 9 preset questions: 6 game rules + 23-Rule, coaching, timeout rules |
 | "Show Me the Proof" citations | ✅ BUILT | Secondary API call extracts verbatim rule number + quote |
-| "Are You Sure?" audit | ✅ BUILT | Deeper audit call; ✅/⚠️/❌ verdict card; injects correction into session; logs flag to `rules_flags` only for CORRECTED/NUANCE ADDED (CONFIRMED = no LO action needed, not logged) |
+| "Are You Sure?" audit | ✅ BUILT | Deeper audit call; ✅/⚠️/❌ verdict card; injects correction into session; logs flag to `rules_flags` only for CORRECTED/NUANCE ADDED (CONFIRMED = no LO action needed, not logged); if user is not yet logged in when flag fires, it is queued in component state and flushed to DB on next `SIGNED_IN` auth event |
 | Session-corrected answers | ✅ BUILT | CORRECTED/NUANCE ADDED verdicts injected into conversation so Claude carries them forward |
 | LO-approved prompt overrides | ✅ BUILT | Fetches approved `prompt_overrides` from Supabase on open; prepended to system prompt |
 | Press-and-hold voice input | 🔶 PARTIAL | Requires custom dev client (`expo-speech-recognition`); degrades gracefully in Expo Go |
@@ -497,16 +522,19 @@ Legend: **✅ BUILT** | **🔶 PARTIAL** | **❌ NOT STARTED**
 | Scoring Index | `/(team)/(tabs)/scoring` | ✅ BUILT | Scorable match list |
 | Coin Flip | `/(team)/(tabs)/scoring/[matchId]/coin-flip` | ✅ BUILT | Two-device Realtime ceremony; Presence + broadcast; writes coin_flip_winner + first_put_up_team |
 | APA Rules Assistant | component (global) | ✅ BUILT | Floating 🎱 FAB + slide-up chat panel; mounted in root layout |
+| Lineup | `/(team)/(tabs)/scoring/[matchId]/lineup` | ✅ BUILT | Pre-match lineup entry; 5-player select + put-up order; 23-rule warn-and-override; writes `lineups`; transitions to `lineup_set` |
 | Catchup Wizard | `/(team)/(tabs)/scoring/[matchId]/catchup` | ✅ BUILT | Retroactive data entry |
 | Put Up | `/(team)/(tabs)/scoring/[matchId]/putup` | ✅ BUILT | Realtime two-device |
 | Resume | `/(team)/(tabs)/scoring/[matchId]/resume` | ✅ BUILT | |
 | Match Progress | `/(team)/(tabs)/scoring/[matchId]/progress` | ✅ BUILT | 5-slot list for in_progress matches; routes to putup or scoring per slot |
 | Individual Match Scoring | `/(team)/(tabs)/scoring/[matchId]/[individualMatchIndex]` | ✅ BUILT | Full scoring screen |
+| Scoreboard Summary | `/(team)/(tabs)/scoring/[matchId]/scoreboard` | ✅ BUILT | APA-style 5-match summary; accessible from finalize after lock |
+| Scoreboard Detail | `/(team)/(tabs)/scoring/[matchId]/scoreboard/[individualMatchIndex]` | ✅ BUILT | Per-rack breakdown; navigated from Scoreboard Summary |
 | Finalize | `/(team)/(tabs)/scoring/[matchId]/finalize` | ✅ BUILT | |
 | Schedule | `/(team)/(tabs)/schedule` | ✅ BUILT | Tappable match cards; pull-to-refresh |
 | Match Detail (read-only) | `/(team)/(tabs)/schedule/[matchId]` | ✅ BUILT | scheduled → both rosters (SL, MP, captain); in_progress → 5-slot progress; completed/finalized → results with APA points |
 | Roster | `/(team)/(tabs)/roster` | ✅ BUILT | View + captain edit mode (remove, add, co-captain promote) |
-| Match History | `/(team)/(tabs)/history` | ❌ NOT STARTED | Linked from Quick Actions |
+| Match History | `/(team)/(tabs)/history` | ✅ BUILT | W/L/T badges, opponent name, score, date; tapping card: TODO full scorecard |
 | Live Viewer (read-only) | — | ❌ NOT STARTED | |
 | Handoff Request (Initiator) | — | ❌ NOT STARTED | Full flow per spec §4.2 |
 | Handoff Request (Receiver) | — | ❌ NOT STARTED | |
@@ -518,6 +546,7 @@ Legend: **✅ BUILT** | **🔶 PARTIAL** | **❌ NOT STARTED**
 | League Settings | — | ❌ NOT STARTED | Spec §2.2 |
 | Match List | `/(admin)/(tabs)/matches` | ✅ BUILT | |
 | Match Detail | `/(admin)/(tabs)/matches/[matchId]` | ✅ BUILT | Read-only + reopen |
+| Broadcasts | `/(admin)/broadcasts` | ✅ BUILT | Compose + send; audience multi-select (categories + specific teams/players); reply threads; archive/close; seen-by modal |
 | Flagged Rules Review | `/(admin)/rules-flags` | ✅ BUILT | Approve/edit/dismiss player-flagged rule interpretations; feeds `prompt_overrides` |
 | Match Flag / Notes | — | ❌ NOT STARTED | |
 | Force Takeover Confirm | — | ❌ NOT STARTED | |
@@ -641,11 +670,11 @@ The following are hardcoded and would need to move to `LeagueSettings` for multi
 - 5 individual matches per team match
 - 8-ball game over options
 
-### Lineups Table Not Integrated
-The `lineups` table (with skill cap enforcement) exists in DB but is not used by the scoring flow. Players are selected via put-up screen (stored directly on `individual_matches`), bypassing lineup pre-confirmation.
+### Lineups Table Partially Integrated
+The `lineups` table is now written by the Lineup screen (pre-match) and transitions the match to `lineup_set`. However, the 23-rule is enforced as a warn-and-override only (not a hard block), the `lineups` schema columns (`player_1_id`…`player_5_id`, `total_skill_level` GENERATED) differ from what the lineup screen inserts (flat rows with `player_id` + `position`), and put-up order stored in the lineup is not yet used by the put-up screen. Players are still selected independently per-match via the put-up screen.
 
 ### Generated Types Stale
-`src/types/database.types.ts` (Supabase-generated) does not include several newer columns: `profiles.league_id`, `profiles.player_id`, `leagues.scorekeeper_count`, `individual_matches.innings_verify_home`/`innings_verify_away`, `players.eight_ball_sl`/`nine_ball_sl`. Code accessing these uses `as any` casts. Re-run `npx supabase gen types` to regenerate when convenient.
+`src/types/database.types.ts` (Supabase-generated) does not include several newer columns: `profiles.league_id`, `profiles.player_id`, `leagues.scorekeeper_count`, `individual_matches.innings_verify_home`/`innings_verify_away`/`timeouts_home`/`timeouts_away`, `players.eight_ball_sl`/`nine_ball_sl`. Code accessing these uses `as any` casts. Re-run `npx supabase gen types` to regenerate when convenient.
 
 ### Racks Not Written to DB
 `racks_eight_ball` table exists but the scoring screen currently only writes match-level totals (`home_points_earned`, `away_points_earned`, `innings`) at match end. Per-rack data is not persisted.
@@ -679,7 +708,7 @@ Both buttons on the superuser dashboard sign out and navigate away (Switch User 
 ### Priority 2 — Missing Screens (team side)
 - [x] Schedule screen `/(team)/(tabs)/schedule` — tappable cards + read-only detail views for all match statuses
 - [x] Roster screen `/(team)/(tabs)/roster` — view + captain edit (add/remove/co-captain)
-- [ ] Match History screen `/(team)/(tabs)/history`
+- [x] Match History screen `/(team)/(tabs)/history` — W/L/T list with scores and dates; full scorecard tap not yet wired
 
 ### Priority 3 — Admin Completeness
 - [ ] Match Flagging & Notes screen
@@ -775,5 +804,6 @@ ON CONFLICT (id) DO NOTHING;
 | 00026 | `broadcasts.sql` | broadcasts, broadcast_replies, broadcast_dismissals, broadcast_reads, broadcast_thread_messages tables; RLS; Realtime |
 | 00027 | `scoreboard_stats.sql` | Timeout counts and lag winner columns on individual_matches for scoreboard display |
 | 00028 | `broadcast_replies_player_id.sql` | Add player_id (FK → players) to broadcast_replies; partial unique index (broadcast_id, player_id); update own_read_replies RLS to match by player_id across sessions |
+| 00029 | `broadcast_audience_array.sql` | Change broadcasts.audience_type from scalar text to text[]; backfill existing rows; update CHECK constraint to validate each element; enables multi-category intersection targeting |
 
-*Last updated: 2026-03-20 | Maintained alongside codebase in `/apa/SPEC.md`*
+*Last updated: 2026-04-05 | Maintained alongside codebase in `/apa/SPEC.md`*

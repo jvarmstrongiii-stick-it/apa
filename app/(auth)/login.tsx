@@ -28,17 +28,6 @@ interface TeamOption {
   divisionName: string;
 }
 
-interface MatchOption {
-  id: string;
-  opponentName: string;
-  matchDate: string;
-  status: 'scheduled' | 'lineup_set' | 'in_progress';
-  isHome: boolean;
-  location: string;
-  gameFormat: string;
-  currentIndividualMatch: number | null;
-}
-
 interface StoredPrefs {
   leagueIds: string[];  // active league IDs at time of save — used to detect new season
   teams: TeamOption[];  // teams confirmed on this device during the current season
@@ -103,43 +92,6 @@ async function clearIdentity(teamId: string): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-function mapMatches(data: any[], teamId: string): MatchOption[] {
-  return data.map((m: any) => {
-    const isHome = m.home_team_id === teamId;
-    const gameFormat = m.division?.league?.game_format === 'nine_ball' ? '9-ball' : '8-ball';
-    const indMatches = m.individual_matches ?? [];
-    const currentMatch = indMatches.length > 0
-      ? Math.max(...indMatches.map((im: any) => im.match_order))
-      : null;
-    return {
-      id: m.id,
-      opponentName: isHome ? (m.away_team?.name ?? 'Unknown') : (m.home_team?.name ?? 'Unknown'),
-      matchDate: m.match_date,
-      status: m.status as MatchOption['status'],
-      isHome,
-      location: m.division?.location ?? '',
-      gameFormat,
-      currentIndividualMatch: currentMatch,
-    };
-  });
-}
-
-const MATCH_STATUS_LABELS: Record<MatchOption['status'], string> = {
-  scheduled: 'Scheduled',
-  lineup_set: 'Lineup Set',
-  in_progress: 'In Progress',
-};
-
-const MATCH_STATUS_COLORS: Record<MatchOption['status'], string> = {
-  scheduled: '#2196F3',
-  lineup_set: '#9C27B0',
-  in_progress: '#FF9800',
-};
-
-// ---------------------------------------------------------------------------
 // Screen
 // ---------------------------------------------------------------------------
 
@@ -151,8 +103,7 @@ export default function LoginScreen() {
   const [activeLeagueIds, setActiveLeagueIds] = useState<string[]>([]);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [selectedTeam, setSelectedTeam] = useState<TeamOption | null>(null);
-  const [step, setStep] = useState<'pick' | 'confirm' | 'who_are_you' | 'match'>('pick');
-  const [availableMatches, setAvailableMatches] = useState<MatchOption[]>([]);
+  const [step, setStep] = useState<'pick' | 'confirm' | 'who_are_you'>('pick');
   const [rosterPlayers, setRosterPlayers] = useState<RosterPlayer[]>([]);
   const [storedIdentity, setStoredIdentity] = useState<PlayerIdentity | null>(null);
   const [isLoading, setIsLoading] = useState(true);
@@ -174,7 +125,7 @@ export default function LoginScreen() {
           home_team:teams!home_team_id(id, name, team_number, divisions(name)),
           away_team:teams!away_team_id(id, name, team_number, divisions(name))
         `)
-        .eq('status', 'scheduled'),
+        .in('status', ['scheduled', 'lineup_set', 'in_progress']),
       supabase
         .from('leagues')
         .select('id')
@@ -252,40 +203,7 @@ export default function LoginScreen() {
   }, [myTeams, teams]);
 
   // ------------------------------------------------------------------
-  // Navigate to a specific match based on its status
-  // ------------------------------------------------------------------
-
-  const navigateToMatch = useCallback((match: MatchOption) => {
-    switch (match.status) {
-      case 'scheduled':
-        router.replace(`/(team)/(tabs)/scoring`);
-        break;
-      case 'lineup_set':
-        router.replace(`/(team)/(tabs)/scoring/${match.id}/0`);
-        break;
-      case 'in_progress':
-        router.replace(`/(team)/(tabs)/scoring/${match.id}/progress`);
-        break;
-    }
-  }, []);
-
-  // ------------------------------------------------------------------
-  // Navigate after identity is confirmed
-  // ------------------------------------------------------------------
-
-  const proceedAfterIdentity = useCallback((matches: MatchOption[]) => {
-    if (matches.length === 0) {
-      router.replace('/');
-    } else if (matches.length === 1) {
-      navigateToMatch(matches[0]);
-    } else {
-      setAvailableMatches(matches);
-      setStep('match');
-    }
-  }, [navigateToMatch]);
-
-  // ------------------------------------------------------------------
-  // Sign in + persist team + fetch matches + roster → who_are_you step
+  // Sign in + persist team + fetch roster → who_are_you step
   // ------------------------------------------------------------------
 
   const handleSignIn = async () => {
@@ -304,20 +222,8 @@ export default function LoginScreen() {
         teams: [selectedTeam, ...existing.filter((t) => t.id !== selectedTeam.id)],
       });
 
-      // Fetch matches and roster in parallel
-      const [matchesResult, rosterResult, identity] = await Promise.all([
-        supabase
-          .from('team_matches')
-          .select(`
-            id, match_date, status, home_team_id, away_team_id,
-            home_team:teams!home_team_id(name),
-            away_team:teams!away_team_id(name),
-            division:divisions!division_id(location, league:leagues!league_id(game_format)),
-            individual_matches(id, match_order)
-          `)
-          .or(`home_team_id.eq.${selectedTeam.id},away_team_id.eq.${selectedTeam.id}`)
-          .in('status', ['scheduled', 'lineup_set', 'in_progress'])
-          .order('match_date', { ascending: true }),
+      // Fetch roster and stored identity in parallel
+      const [rosterResult, identity] = await Promise.all([
         supabase
           .from('team_players')
           .select('is_captain, player:players!player_id(id, first_name, last_name)')
@@ -325,8 +231,6 @@ export default function LoginScreen() {
           .is('left_at', null),
         loadIdentity(selectedTeam.id),
       ]);
-
-      const matches = mapMatches(matchesResult.data ?? [], selectedTeam.id);
 
       const roster: RosterPlayer[] = (rosterResult.data ?? [])
         .map((tp: any) => ({
@@ -340,7 +244,6 @@ export default function LoginScreen() {
           return a.name.localeCompare(b.name);
         });
 
-      setAvailableMatches(matches);
       setRosterPlayers(roster);
       setStoredIdentity(identity);
       setStep('who_are_you');
@@ -352,7 +255,7 @@ export default function LoginScreen() {
   };
 
   // ------------------------------------------------------------------
-  // Identity confirmed — set on profile, save locally, proceed
+  // Identity confirmed — set on profile, save locally, go to dashboard
   // ------------------------------------------------------------------
 
   const handleIdentityConfirmed = async (identity: PlayerIdentity) => {
@@ -365,7 +268,7 @@ export default function LoginScreen() {
       await supabase.rpc('set_player_identity', { p_player_id: identity.playerId });
       await saveIdentity(selectedTeam.id, identity);
       await refreshProfile();  // update isCaptain in auth context before navigating
-      proceedAfterIdentity(availableMatches);
+      router.replace('/');
     } catch (err: any) {
       setError('Could not save identity. Please try again.');
       setIsSettingIdentity(false);
@@ -439,90 +342,7 @@ export default function LoginScreen() {
               </View>
             )}
 
-            {step === 'match' && selectedTeam ? (
-              /* ----------------------------------------------------------------
-               * Match selection step
-               * --------------------------------------------------------------- */
-              <>
-                <Text style={styles.confirmLabel}>You selected</Text>
-                <View style={styles.confirmTeamBox}>
-                  <Text style={styles.confirmTeamName}>{selectedTeam.name}</Text>
-                </View>
-                <Text style={styles.matchPickerSubtitle}>
-                  Which match would you like to score?
-                </Text>
-
-                {availableMatches.map((match) => (
-                  <Pressable
-                    key={match.id}
-                    style={({ pressed }) => [
-                      styles.matchCard,
-                      pressed && styles.matchCardPressed,
-                    ]}
-                    onPress={() => navigateToMatch(match)}
-                  >
-                    <View style={styles.matchCardTop}>
-                      <View style={styles.matchFormatBadge}>
-                        <Text style={styles.matchFormatText}>{match.gameFormat}</Text>
-                      </View>
-                      <View
-                        style={[
-                          styles.matchStatusBadge,
-                          { backgroundColor: MATCH_STATUS_COLORS[match.status] + '20' },
-                        ]}
-                      >
-                        <Text
-                          style={[
-                            styles.matchStatusText,
-                            { color: MATCH_STATUS_COLORS[match.status] },
-                          ]}
-                        >
-                          {MATCH_STATUS_LABELS[match.status]}
-                        </Text>
-                      </View>
-                    </View>
-
-                    <Text style={styles.matchOpponent}>
-                      {match.isHome ? 'vs' : '@'} {match.opponentName}
-                    </Text>
-
-                    <View style={styles.matchMetaRow}>
-                      <Ionicons name="calendar-outline" size={13} color={theme.colors.textSecondary} />
-                      <Text style={styles.matchMetaText}>
-                        {new Date(match.matchDate).toLocaleDateString('en-US', {
-                          weekday: 'short',
-                          month: 'short',
-                          day: 'numeric',
-                        })}
-                      </Text>
-                      {match.location ? (
-                        <>
-                          <Ionicons name="location-outline" size={13} color={theme.colors.textSecondary} />
-                          <Text style={styles.matchMetaText}>{match.location}</Text>
-                        </>
-                      ) : null}
-                    </View>
-
-                    <View style={styles.matchGoRow}>
-                      <Text style={styles.matchGoText}>Select this match</Text>
-                      <Ionicons name="arrow-forward" size={16} color={theme.colors.primary} />
-                    </View>
-                  </Pressable>
-                ))}
-
-                <Pressable
-                  style={styles.changeTeamButton}
-                  onPress={() => {
-                    setStep('pick');
-                    setSelectedTeam(null);
-                    setAvailableMatches([]);
-                  }}
-                >
-                  <Text style={styles.changeTeamText}>Change Team</Text>
-                </Pressable>
-              </>
-
-            ) : step === 'who_are_you' && selectedTeam ? (
+            {step === 'who_are_you' && selectedTeam ? (
               /* ----------------------------------------------------------------
                * Who are you? step
                * If identity is stored: show "Continue as X?" verification.
@@ -615,12 +435,14 @@ export default function LoginScreen() {
                               {player.name.split(' ').map((n) => n[0]).join('')}
                             </Text>
                           </View>
-                          <Text style={styles.rosterPlayerName}>{player.name}</Text>
-                          {player.isCaptain && (
-                            <View style={styles.captainBadge}>
-                              <Text style={styles.captainBadgeText}>Captain</Text>
-                            </View>
-                          )}
+                          <View style={{ flexDirection: 'column' }}>
+                            <Text style={styles.rosterPlayerName}>{player.name}</Text>
+                            {player.isCaptain && (
+                              <View style={[styles.captainBadge, { marginTop: 4, alignSelf: 'flex-start' }]}>
+                                <Text style={styles.captainBadgeText}>Captain</Text>
+                              </View>
+                            )}
+                          </View>
                           <Ionicons
                             name="chevron-forward"
                             size={18}
@@ -989,81 +811,6 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontWeight: '700',
     color: '#FF9800',
-  },
-
-  // Match selection step
-  matchPickerSubtitle: {
-    fontSize: 15,
-    color: theme.colors.textSecondary,
-    textAlign: 'center',
-    marginBottom: 16,
-    marginTop: 4,
-  },
-  matchCard: {
-    backgroundColor: theme.colors.background,
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: theme.colors.border,
-    padding: 16,
-    marginBottom: 10,
-  },
-  matchCardPressed: {
-    opacity: 0.8,
-    borderColor: theme.colors.primary,
-  },
-  matchCardTop: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 8,
-  },
-  matchFormatBadge: {
-    backgroundColor: theme.colors.primary + '15',
-    borderRadius: 6,
-    paddingHorizontal: 8,
-    paddingVertical: 2,
-  },
-  matchFormatText: {
-    fontSize: 11,
-    fontWeight: '700',
-    color: theme.colors.primary,
-    textTransform: 'uppercase',
-  },
-  matchStatusBadge: {
-    borderRadius: 6,
-    paddingHorizontal: 8,
-    paddingVertical: 2,
-  },
-  matchStatusText: {
-    fontSize: 11,
-    fontWeight: '600',
-  },
-  matchOpponent: {
-    fontSize: 17,
-    fontWeight: '700',
-    color: theme.colors.text,
-    marginBottom: 6,
-  },
-  matchMetaRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    flexWrap: 'wrap',
-    marginBottom: 10,
-  },
-  matchMetaText: {
-    fontSize: 13,
-    color: theme.colors.textSecondary,
-  },
-  matchGoRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-  },
-  matchGoText: {
-    fontSize: 13,
-    fontWeight: '600',
-    color: theme.colors.primary,
   },
 
   // Landing buttons

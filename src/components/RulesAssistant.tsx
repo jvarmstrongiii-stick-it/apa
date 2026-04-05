@@ -1,8 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
 import {
   Animated,
+  Dimensions,
   KeyboardAvoidingView,
   Modal,
+  PanResponder,
   Platform,
   Pressable,
   ScrollView,
@@ -12,12 +14,18 @@ import {
   View,
 } from 'react-native';
 import { NativeModules } from 'react-native';
+import * as SecureStore from 'expo-secure-store';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { supabase } from '../lib/supabase/client';
+import { useAuthContext } from '../providers/AuthProvider';
 
 // expo-speech-recognition requires a custom dev client — not available in Expo Go.
 // Gracefully degrade: mic button is hidden when the native module isn't linked.
 const SPEECH_AVAILABLE = !!NativeModules.ExpoSpeechRecognition;
+
+const FAB_SIZE = 58;
+const { width: SW, height: SH } = Dimensions.get('window');
+const FAB_STORE_KEY = 'fab-position';
 
 let ExpoSpeechRecognitionModule: {
   requestPermissionsAsync: () => Promise<{ granted: boolean }>;
@@ -271,6 +279,7 @@ function AnimatedDot({ delay }: { delay: number }) {
 
 // ─── Main component ────────────────────────────────────────────────────────────
 export default function RulesAssistant({ apiKey }: { apiKey: string }) {
+  const { isAuthenticated, profile, role } = useAuthContext();
   const insets = useSafeAreaInsets();
   const [open, setOpen] = useState(false);
   const [messages, setMessages] = useState<Message[]>([]);
@@ -283,12 +292,62 @@ export default function RulesAssistant({ apiKey }: { apiKey: string }) {
   const [systemPromptExtra, setSystemPromptExtra] = useState('');
   const [expandedScenarios, setExpandedScenarios] = useState<Record<number, Set<number>>>({});
   const [listening, setListening] = useState(false);
+  const [pendingFlag, setPendingFlag] = useState<{
+    question: string;
+    original_answer: string;
+    audit_verdict: string;
+    proposed_correction: string | null;
+  } | null>(null);
   const pulseAnim = useRef(new Animated.Value(1)).current;
   const pulseLoop = useRef<Animated.CompositeAnimation | null>(null);
   const scrollRef = useRef<ScrollView>(null);
   const messageYOffsets = useRef<number[]>([]);
   const inputRef = useRef<TextInput>(null);
   const fabLongPressed = useRef(false);
+
+  // ─── Draggable FAB ───────────────────────────────────────────────────────
+  const defaultFabPos = { x: SW - FAB_SIZE - 20, y: SH - insets.bottom - 80 - FAB_SIZE };
+  const pan = useRef(new Animated.ValueXY(defaultFabPos)).current;
+  const posRef = useRef(defaultFabPos);
+
+  // Load persisted position
+  useEffect(() => {
+    SecureStore.getItemAsync(FAB_STORE_KEY).then(saved => {
+      if (saved) {
+        const pos = JSON.parse(saved) as { x: number; y: number };
+        posRef.current = pos;
+        pan.setValue(pos);
+      }
+    });
+  }, []);
+
+  const panResponder = useRef(
+    PanResponder.create({
+      onMoveShouldSetPanResponder: (_, g) =>
+        Math.abs(g.dx) > 5 || Math.abs(g.dy) > 5,
+      onPanResponderGrant: () => {
+        pan.setOffset(posRef.current);
+        pan.setValue({ x: 0, y: 0 });
+      },
+      onPanResponderMove: Animated.event(
+        [null, { dx: pan.x, dy: pan.y }],
+        { useNativeDriver: false }
+      ),
+      onPanResponderRelease: (_, g) => {
+        pan.flattenOffset();
+        const newX = Math.max(0, Math.min(SW - FAB_SIZE, posRef.current.x + g.dx));
+        const newY = Math.max(0, Math.min(SH - FAB_SIZE, posRef.current.y + g.dy));
+        posRef.current = { x: newX, y: newY };
+        Animated.spring(pan, {
+          toValue: { x: newX, y: newY },
+          useNativeDriver: false,
+          friction: 6,
+          tension: 80,
+        }).start();
+        SecureStore.setItemAsync(FAB_STORE_KEY, JSON.stringify({ x: newX, y: newY }));
+      },
+    })
+  ).current;
 
   // Pulse animation while mic is held
   useEffect(() => {
@@ -372,6 +431,20 @@ export default function RulesAssistant({ apiKey }: { apiKey: string }) {
       });
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
+
+  // Flush any flag that was generated before the user logged in
+  useEffect(() => {
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
+      if (event === 'SIGNED_IN' && session?.user?.id && pendingFlag) {
+        await supabase.from('rules_flags').insert({
+          user_id: session.user.id,
+          ...pendingFlag,
+        });
+        setPendingFlag(null);
+      }
+    });
+    return () => subscription.unsubscribe();
+  }, [pendingFlag]);
 
   const callAPI = async (system: string, msgs: Message[], maxTokens = 800) => {
     const res = await fetch('https://api.anthropic.com/v1/messages', {
@@ -457,15 +530,20 @@ export default function RulesAssistant({ apiKey }: { apiKey: string }) {
 
       // Log flag to Supabase only when there's something for the LO to review
       // (CONFIRMED answers are correct — no action needed, skip logging)
-      const { data: { user } } = await supabase.auth.getUser();
-      if (user?.id && result.verdict !== 'CONFIRMED') {
-        await supabase.from('rules_flags').insert({
-          user_id: user.id,
+      if (result.verdict !== 'CONFIRMED') {
+        const { data: { user } } = await supabase.auth.getUser();
+        const flagData = {
           question,
           original_answer: answer,
           audit_verdict: result.verdict,
           proposed_correction: result.correction ?? null,
-        });
+        };
+        if (user?.id) {
+          await supabase.from('rules_flags').insert({ user_id: user.id, ...flagData });
+        } else {
+          // Queue to be written once the user logs in
+          setPendingFlag(flagData);
+        }
       }
 
       // Inject correction into conversation so Claude carries it forward this session
@@ -502,11 +580,16 @@ export default function RulesAssistant({ apiKey }: { apiKey: string }) {
   // FAB positioned above tab bar
   const fabBottom = insets.bottom + 80;
 
+  if (!isAuthenticated || !role || (role === 'team' && !(profile as any)?.player_id)) return null;
+
   return (
     <>
       {/* Floating ball button — transparent overlay so taps pass through everywhere else */}
       <View pointerEvents="box-none" style={StyleSheet.absoluteFill}>
-        <Animated.View style={[styles.fab, { bottom: fabBottom }, listening && { transform: [{ scale: pulseAnim }] }]}>
+        <Animated.View
+          style={[styles.fab, { left: pan.x, top: pan.y }, listening && { transform: [{ scale: pulseAnim }] }]}
+          {...panResponder.panHandlers}
+        >
           <Pressable
             onPressIn={() => { fabLongPressed.current = false; }}
             onLongPress={() => {
@@ -544,7 +627,7 @@ export default function RulesAssistant({ apiKey }: { apiKey: string }) {
           <View style={styles.header}>
             <View style={styles.headerSpacer} />
             <View style={styles.headerCenter}>
-              <Text style={styles.headerTitle}>🎱  APA Rules Assistant  🎳</Text>
+              <Text style={styles.headerTitle}>🎱  APA Rules Assistant  🎱</Text>
               <Text style={styles.headerSub}>2023 OFFICIAL RULEBOOK</Text>
             </View>
             <Pressable onPress={() => setOpen(false)} style={styles.closeBtn} accessibilityRole="button" accessibilityLabel="Close">
@@ -806,10 +889,9 @@ const styles = StyleSheet.create({
   // FAB
   fab: {
     position: 'absolute',
-    right: 20,
-    width: 58,
-    height: 58,
-    borderRadius: 29,
+    width: FAB_SIZE,
+    height: FAB_SIZE,
+    borderRadius: FAB_SIZE / 2,
     backgroundColor: C.brown,
     borderWidth: 2,
     borderColor: C.gold,

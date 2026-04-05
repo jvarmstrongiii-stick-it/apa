@@ -35,7 +35,7 @@ interface Broadcast {
   type: 'message' | 'poll';
   reply_type: 'none' | 'text' | 'options';
   reply_options: string[] | null;
-  audience_type: string;
+  audience_type: string | string[];
   audience_ids: string[] | null;
   closed_at: string | null;
   is_archived?: boolean;
@@ -58,6 +58,75 @@ export default function TeamDashboard() {
   const [broadcasts, setBroadcasts] = useState<Broadcast[]>([]);
   const [broadcastReplies, setBroadcastReplies] = useState<Record<string, string>>({});
   const [broadcastThreads, setBroadcastThreads] = useState<Record<string, BroadcastThreadMessage[]>>({});
+
+  const fetchBroadcasts = useCallback(async () => {
+    if (!teamId || !userId) return;
+    const [broadcastsRes, repliesRes, dismissalsRes, threadsRes, gameFormatRes] = await Promise.all([
+      supabase
+        .from('broadcasts')
+        .select('id, created_at, body, type, reply_type, reply_options, audience_type, audience_ids, closed_at')
+        .order('created_at', { ascending: false }),
+      supabase.from('broadcast_replies').select('broadcast_id, body'),
+      supabase.from('broadcast_dismissals').select('broadcast_id').eq('user_id', userId),
+      supabase
+        .from('broadcast_thread_messages')
+        .select('id, created_at, broadcast_id, body, is_from_lo, is_read')
+        .eq('thread_user_id', userId)
+        .order('created_at', { ascending: true }),
+      supabase
+        .from('team_matches')
+        .select('game_format')
+        .or(`home_team_id.eq.${teamId},away_team_id.eq.${teamId}`)
+        .not('game_format', 'is', null)
+        .limit(1)
+        .maybeSingle(),
+    ]);
+
+    if (broadcastsRes.error) console.error('[Dashboard] broadcasts fetch error:', broadcastsRes.error);
+
+    const teamGameFormat: string | null = (gameFormatRes.data as any)?.game_format ?? null;
+    const playerId: string | null = (profile as any)?.player_id ?? null;
+
+    const dismissedIds = new Set((dismissalsRes.data ?? []).map((d: any) => d.broadcast_id));
+    const repliedIds = new Set((repliesRes.data ?? []).map((r: any) => r.broadcast_id));
+    const replyMap: Record<string, string> = {};
+    for (const r of repliesRes.data ?? []) replyMap[(r as any).broadcast_id] = (r as any).body;
+
+    const threadMap: Record<string, BroadcastThreadMessage[]> = {};
+    for (const m of (threadsRes.data ?? []) as BroadcastThreadMessage[]) {
+      if (!threadMap[m.broadcast_id]) threadMap[m.broadcast_id] = [];
+      threadMap[m.broadcast_id].push(m);
+    }
+
+    const hasUnreadLoReply = (broadcastId: string) =>
+      (threadMap[broadcastId] ?? []).some(m => m.is_from_lo && !m.is_read);
+
+    const matchesAudience = (b: Broadcast): boolean => {
+      const audienceTypes = Array.isArray(b.audience_type) ? b.audience_type : [b.audience_type];
+      return audienceTypes.every(t => {
+        switch (t) {
+          case 'all': return true;
+          case 'captains_only': return isCaptain;
+          case 'eight_ball': return teamGameFormat === 'eight_ball';
+          case 'nine_ball': return teamGameFormat === 'nine_ball';
+          case 'teams': return (b.audience_ids ?? []).includes(teamId!);
+          case 'players': return !!playerId && (b.audience_ids ?? []).includes(playerId);
+          case 'masters':
+          default: return true;
+        }
+      });
+    };
+
+    const visible = ((broadcastsRes.data ?? []) as Broadcast[]).filter(b => {
+      if (dismissedIds.has(b.id)) return false;
+      if (repliedIds.has(b.id) && !hasUnreadLoReply(b.id)) return false;
+      return matchesAudience(b);
+    });
+
+    setBroadcasts(visible);
+    setBroadcastReplies(replyMap);
+    setBroadcastThreads(threadMap);
+  }, [teamId, userId, isCaptain, profile]);
 
   const fetchDashboard = useCallback(async () => {
     if (!teamId || !userId) { setIsLoading(false); return; }
@@ -110,53 +179,8 @@ export default function TeamDashboard() {
         };
       }
 
-      // Fetch broadcasts, replies, dismissals, and direct thread messages in parallel
-      const [broadcastsRes, repliesRes, dismissalsRes, threadsRes] = await Promise.all([
-        supabase
-          .from('broadcasts')
-          .select('id, created_at, body, type, reply_type, reply_options, audience_type, audience_ids, closed_at')
-          .order('created_at', { ascending: false }),
-        supabase.from('broadcast_replies').select('broadcast_id, body'),
-        supabase.from('broadcast_dismissals').select('broadcast_id').eq('user_id', userId),
-        supabase
-          .from('broadcast_thread_messages')
-          .select('id, created_at, broadcast_id, body, is_from_lo')
-          .eq('thread_user_id', userId)
-          .order('created_at', { ascending: true }),
-      ]);
-
-      if (broadcastsRes.error) console.error('[Dashboard] broadcasts fetch error:', broadcastsRes.error);
-
-      const dismissedIds = new Set((dismissalsRes.data ?? []).map((d: any) => d.broadcast_id));
-      const repliedIds = new Set((repliesRes.data ?? []).map((r: any) => r.broadcast_id));
-      const replyMap: Record<string, string> = {};
-      for (const r of repliesRes.data ?? []) replyMap[(r as any).broadcast_id] = (r as any).body;
-
-      const threadMap: Record<string, BroadcastThreadMessage[]> = {};
-      for (const m of (threadsRes.data ?? []) as BroadcastThreadMessage[]) {
-        if (!threadMap[m.broadcast_id]) threadMap[m.broadcast_id] = [];
-        threadMap[m.broadcast_id].push(m);
-      }
-
-      // Client-side audience filter
-      const visible = ((broadcastsRes.data ?? []) as Broadcast[]).filter(b => {
-        if (dismissedIds.has(b.id) || repliedIds.has(b.id)) return false;
-        switch (b.audience_type) {
-          case 'all': return true;
-          case 'captains_only': return isCaptain;
-          case 'teams': return (b.audience_ids ?? []).includes(teamId!);
-          // These require player identity — show to all for now until that feature lands
-          case 'players':
-          case 'eight_ball':
-          case 'nine_ball':
-          case 'masters':
-          default: return true;
-        }
-      });
-
-      setBroadcasts(visible);
-      setBroadcastReplies(replyMap);
-      setBroadcastThreads(threadMap);
+      // Fetch broadcasts separately (extracted for reuse by Realtime handler)
+      await fetchBroadcasts();
 
       setTeamData({
         teamName: team?.name ?? 'My Team',
@@ -195,22 +219,36 @@ export default function TeamDashboard() {
           const b = payload.new as Broadcast;
           if (b.is_archived) return;
           if (b.expires_at && new Date(b.expires_at) <= new Date()) return;
-          // Apply same audience filter
-          const passes = (() => {
-            switch (b.audience_type) {
+          // Apply same intersection audience filter
+          const audienceTypes = Array.isArray(b.audience_type) ? b.audience_type : [b.audience_type];
+          const playerId: string | null = (profile as any)?.player_id ?? null;
+          const passes = audienceTypes.every(t => {
+            switch (t) {
               case 'all': return true;
               case 'captains_only': return isCaptain;
               case 'teams': return (b.audience_ids ?? []).includes(teamId);
+              case 'players': return !!playerId && (b.audience_ids ?? []).includes(playerId);
               default: return true;
             }
-          })();
+          });
           if (passes) setBroadcasts(prev => [b, ...prev]);
+        }
+      )
+      .on(
+        'postgres_changes',
+        { event: 'UPDATE', schema: 'public', table: 'broadcasts' },
+        (payload) => {
+          const b = payload.new as Broadcast;
+          const isExpired = b.expires_at && new Date(b.expires_at) <= new Date();
+          if (b.is_archived || isExpired) {
+            setBroadcasts(prev => prev.filter(x => x.id !== b.id));
+          }
         }
       )
       .subscribe();
 
     return () => { channel.unsubscribe(); };
-  }, [teamId, userId, isCaptain]);
+  }, [teamId, userId, isCaptain, profile]);
 
   // Realtime: direct LO thread messages addressed to this user
   useEffect(() => {
@@ -227,16 +265,21 @@ export default function TeamDashboard() {
         },
         (payload) => {
           const m = payload.new as BroadcastThreadMessage;
-          setBroadcastThreads(prev => ({
-            ...prev,
-            [m.broadcast_id]: [...(prev[m.broadcast_id] ?? []), m],
-          }));
+          if (m.is_from_lo) {
+            // LO replied — refetch broadcasts so the card reappears if it was hidden
+            fetchBroadcasts();
+          } else {
+            setBroadcastThreads(prev => ({
+              ...prev,
+              [m.broadcast_id]: [...(prev[m.broadcast_id] ?? []), m],
+            }));
+          }
         }
       )
       .subscribe();
 
     return () => { channel.unsubscribe(); };
-  }, [userId]);
+  }, [userId, fetchBroadcasts]);
 
   // Broadcast handlers
   const handleBroadcastReply = useCallback(async (broadcastId: string, text: string) => {
@@ -271,18 +314,7 @@ export default function TeamDashboard() {
       body: text,
     });
     if (error) throw error;
-    // Optimistically add to thread state (realtime will also fire)
-    const newMsg: BroadcastThreadMessage = {
-      id: Date.now().toString(),
-      created_at: new Date().toISOString(),
-      broadcast_id: broadcastId,
-      body: text,
-      is_from_lo: false,
-    };
-    setBroadcastThreads(prev => ({
-      ...prev,
-      [broadcastId]: [...(prev[broadcastId] ?? []), newMsg],
-    }));
+    // Realtime subscription delivers the message
   }, [userId, teamId]);
 
   const nextMatchDate = teamData.nextMatch
@@ -410,7 +442,7 @@ export default function TeamDashboard() {
                 if (match.status === 'in_progress') {
                   router.push(`/(team)/(tabs)/scoring/${match.id}/progress`);
                 } else {
-                  router.push(`/(team)/(tabs)/scoring/${match.id}/coin-flip`);
+                  router.push(`/(team)/(tabs)/scoring/${match.id}/first-match-check`);
                 }
               }}
             >
