@@ -46,6 +46,7 @@ interface MatchResult {
   away_pts: number;
   winner: 'home' | 'away' | null;
   is_complete: boolean;
+  is_backfilled: boolean;
 }
 
 // ─── 8-ball race table ────────────────────────────────────────────────────────
@@ -126,8 +127,8 @@ export default function FinalizeScreen() {
           .from('individual_matches')
           .select([
             '*',
-            'home_player:players!home_player_id(first_name, last_name, skill_level)',
-            'away_player:players!away_player_id(first_name, last_name, skill_level)',
+            'home_player:players!home_player_id(first_name, last_name, current_8_ball_sl, current_9_ball_sl)',
+            'away_player:players!away_player_id(first_name, last_name, current_8_ball_sl, current_9_ball_sl)',
           ].join(', '))
           .eq('team_match_id', matchId)
           .order('match_order');
@@ -138,11 +139,11 @@ export default function FinalizeScreen() {
         }
 
         const mapped: MatchResult[] = (data ?? []).map((im: any) => {
-          const hsl: number = im.home_player?.skill_level ?? im.home_skill_level ?? 3;
-          const asl: number = im.away_player?.skill_level ?? im.away_skill_level ?? 3;
+          const hsl: number = (im.home_player?.current_8_ball_sl ?? im.home_player?.current_9_ball_sl) ?? im.home_skill_level ?? 3;
+          const asl: number = (im.away_player?.current_8_ball_sl ?? im.away_player?.current_9_ball_sl) ?? im.away_skill_level ?? 3;
           const [hRace, aRace] = getRace(hsl, asl);
-          const hRacks: number = im.home_points_earned ?? 0;
-          const aRacks: number = im.away_points_earned ?? 0;
+          const hRacks: number = im.home_racks_won ?? im.home_points_earned ?? 0;
+          const aRacks: number = im.away_racks_won ?? im.away_points_earned ?? 0;
           const [hPts, aPts] = calcApaPoints(hRacks, aRacks, hRace, aRace);
           const winner: 'home' | 'away' | null =
             hRacks >= hRace ? 'home' : aRacks >= aRace ? 'away' : null;
@@ -165,6 +166,7 @@ export default function FinalizeScreen() {
             away_pts: aPts,
             winner,
             is_complete: winner !== null,
+            is_backfilled: im.is_backfilled === true,
           };
         });
         setResults(mapped);
@@ -295,6 +297,15 @@ export default function FinalizeScreen() {
             <Ionicons name="warning" size={20} color="#FF9800" />
             <Text style={styles.warningText}>
               {incompleteCount} match{incompleteCount > 1 ? 'es' : ''} incomplete — cannot finalize yet.
+            </Text>
+          </View>
+        )}
+
+        {/* ── Backfill summary ── */}
+        {results.some(r => r.is_backfilled) && (
+          <View style={styles.backfillBanner}>
+            <Text style={styles.backfillText}>
+              {results.filter(r => r.is_backfilled).length} match{results.filter(r => r.is_backfilled).length > 1 ? 'es' : ''} from scoresheet · {results.filter(r => !r.is_backfilled && r.is_complete).length} scored in app
             </Text>
           </View>
         )}
@@ -482,15 +493,24 @@ export default function FinalizeScreen() {
         </View>
       )}
 
-      {/* ── Locked: Done button ── */}
+      {/* ── Locked: Scoreboard + Done buttons ── */}
       {isLocked && !showUnlock && (
         <View style={styles.bottomBar}>
-          <Pressable
-            style={({ pressed }) => [styles.doneBtn, pressed && styles.pressed]}
-            onPress={() => router.replace('/(team)/(tabs)')}
-          >
-            <Text style={styles.doneBtnText}>Done</Text>
-          </Pressable>
+          <View style={styles.lockedBtnRow}>
+            <Pressable
+              style={({ pressed }) => [styles.scoreboardBtn, pressed && styles.pressed]}
+              onPress={() => router.push(`/(team)/(tabs)/scoring/${matchId}/scoreboard`)}
+            >
+              <Ionicons name="list" size={18} color={theme.colors.primary} />
+              <Text style={styles.scoreboardBtnText}>Scoreboard</Text>
+            </Pressable>
+            <Pressable
+              style={({ pressed }) => [styles.doneBtn, pressed && styles.pressed]}
+              onPress={() => router.replace('/(team)/(tabs)')}
+            >
+              <Text style={styles.doneBtnText}>Done</Text>
+            </Pressable>
+          </View>
         </View>
       )}
 
@@ -579,6 +599,22 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: '#FF9800',
     fontWeight: '600',
+  },
+
+  backfillBanner: {
+    backgroundColor: theme.colors.surface,
+    borderRadius: 10,
+    paddingVertical: 10,
+    paddingHorizontal: 14,
+    borderWidth: 1,
+    borderColor: theme.colors.border,
+    marginBottom: 16,
+    alignItems: 'center',
+  },
+  backfillText: {
+    fontSize: 13,
+    color: theme.colors.textSecondary,
+    fontStyle: 'italic',
   },
 
   // Total score card
@@ -885,6 +921,27 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     color: '#FFFFFF',
   },
+  lockedBtnRow: {
+    flexDirection: 'row',
+    gap: 12,
+  },
+  scoreboardBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    borderWidth: 1.5,
+    borderColor: theme.colors.primary,
+    borderRadius: 14,
+    paddingVertical: 18,
+    minHeight: 56,
+    flex: 1,
+  },
+  scoreboardBtnText: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: theme.colors.primary,
+  },
   doneBtn: {
     alignItems: 'center',
     justifyContent: 'center',
@@ -892,6 +949,7 @@ const styles = StyleSheet.create({
     borderRadius: 14,
     paddingVertical: 18,
     minHeight: 56,
+    flex: 1,
   },
   doneBtnText: {
     fontSize: 18,

@@ -21,6 +21,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import {
   ActivityIndicator,
+  Alert,
   BackHandler,
   Pressable,
   ScrollView,
@@ -57,6 +58,23 @@ interface IndividualMatchRecord {
   home_player_id: string | null;
   away_player_id: string | null;
   put_up_team: Side | null;
+  home_skill_level: number | null;
+  away_skill_level: number | null;
+}
+
+// ─── Racks-needed table: RACE[homeSL][awaySL] = [homeRacksNeeded, awayRacksNeeded] ─
+
+const RACE: Record<number, Record<number, [number, number]>> = {
+  2: { 2: [2, 2], 3: [2, 3], 4: [2, 4], 5: [2, 5], 6: [2, 6], 7: [2, 7] },
+  3: { 2: [3, 2], 3: [2, 2], 4: [2, 3], 5: [2, 4], 6: [2, 5], 7: [2, 6] },
+  4: { 2: [4, 2], 3: [3, 2], 4: [3, 3], 5: [3, 4], 6: [3, 5], 7: [2, 5] },
+  5: { 2: [5, 2], 3: [4, 2], 4: [4, 3], 5: [4, 4], 6: [4, 5], 7: [3, 5] },
+  6: { 2: [6, 2], 3: [5, 2], 4: [5, 3], 5: [5, 4], 6: [5, 5], 7: [4, 5] },
+  7: { 2: [7, 2], 3: [6, 2], 4: [5, 2], 5: [5, 3], 6: [5, 4], 7: [5, 5] },
+};
+
+function getRacksNeeded(homeSL: number, awaySL: number): [number, number] {
+  return RACE[homeSL]?.[awaySL] ?? [2, 2];
 }
 
 type Phase =
@@ -91,6 +109,9 @@ export default function PutUpScreen() {
   const [opponentTentativeId, setOpponentTentativeId] = useState<string | null>(null);
   const [priorHomeSL, setPriorHomeSL] = useState(0);
   const [priorAwaySL, setPriorAwaySL] = useState(0);
+  const [usedPlayerIds, setUsedPlayerIds] = useState<Set<string>>(new Set());
+  const [usedOpponentPlayerIds, setUsedOpponentPlayerIds] = useState<Set<string>>(new Set());
+  const [recycleNotice, setRecycleNotice] = useState<string | null>(null);
 
   // Offline fallback — shown when connectivity is absent or Realtime times out
   const [offlineFallback, setOfflineFallback] = useState(false);
@@ -100,11 +121,29 @@ export default function PutUpScreen() {
   const channelRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
   const realtimeTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Block Android hardware back button during put-up
+  // ─── Cancel / back: notify other device and return to progress screen ────
+  const handleCancel = useCallback(async () => {
+    // Clear any partial player ID we already wrote to DB
+    if (indMatch?.id) {
+      const clearFields: Record<string, null> = {};
+      if (ourSide === 'home' && indMatch.home_player_id) clearFields.home_player_id = null;
+      if (ourSide === 'away' && indMatch.away_player_id) clearFields.away_player_id = null;
+      if (Object.keys(clearFields).length > 0) {
+        await supabase.from('individual_matches').update(clearFields).eq('id', indMatch.id);
+      }
+    }
+    channelRef.current?.send({ type: 'broadcast', event: 'putup_cancel', payload: {} });
+    router.replace(`/(team)/(tabs)/scoring/${matchId}/progress`);
+  }, [indMatch, ourSide, matchId]);
+
+  // Android hardware back → cancel (same as tapping the back arrow)
   useEffect(() => {
-    const sub = BackHandler.addEventListener('hardwareBackPress', () => true);
+    const sub = BackHandler.addEventListener('hardwareBackPress', () => {
+      handleCancel();
+      return true;
+    });
     return () => sub.remove();
-  }, []);
+  }, [handleCancel]);
 
   // ─── Dev bypass (triple-tap header title → auto-fill both players) ────────
   const [devTapCount, setDevTapCount] = useState(0);
@@ -244,15 +283,26 @@ export default function PutUpScreen() {
 
       setOpponentRoster(mapRoster(oppRosterData ?? []));
 
-      // Fetch SL totals from already-completed matches this session (for matches 2–5)
+      // Fetch SL totals + used players from prior matches this session (for matches 2–5)
       if (matchOrder > 1) {
         const { data: priorMatches } = await supabase
           .from('individual_matches')
-          .select('home_skill_level, away_skill_level')
+          .select('home_player_id, away_player_id, home_skill_level, away_skill_level')
           .eq('team_match_id', matchId)
           .lt('match_order', matchOrder);
         setPriorHomeSL((priorMatches ?? []).reduce((s: number, m: any) => s + (m.home_skill_level ?? 0), 0));
         setPriorAwaySL((priorMatches ?? []).reduce((s: number, m: any) => s + (m.away_skill_level ?? 0), 0));
+        // Build set of player IDs that already shot this session, per side
+        const usedIds = new Set<string>();
+        const usedOppIds = new Set<string>();
+        for (const m of priorMatches ?? []) {
+          if (side === 'home' && m.home_player_id) usedIds.add(m.home_player_id);
+          if (side === 'away' && m.away_player_id) usedIds.add(m.away_player_id);
+          if (side === 'home' && m.away_player_id) usedOppIds.add(m.away_player_id);
+          if (side === 'away' && m.home_player_id) usedOppIds.add(m.home_player_id);
+        }
+        setUsedPlayerIds(usedIds);
+        setUsedOpponentPlayerIds(usedOppIds);
       }
 
       // Fetch existing individual match, or create it
@@ -297,7 +347,7 @@ export default function PutUpScreen() {
 
       // Check connectivity — if offline, show fallback immediately
       const net = await NetInfo.fetch();
-      if (!net.isConnected) setOfflineFallback(true);
+      if (net.isConnected === false) setOfflineFallback(true);
 
       setLoading(false);
     };
@@ -323,8 +373,9 @@ export default function PutUpScreen() {
           setOpponentConnected(true);
           const updated = payload.new as IndividualMatchRecord;
           setIndMatch(updated);
-          // Clear opponent tentative once they've confirmed
+          // Clear opponent tentative + recycle notice once they've confirmed
           setOpponentTentativeId(null);
+          setRecycleNotice(null);
           await fetchOpponentPlayer(updated, ourSide, opponentTeamId);
         }
       )
@@ -333,6 +384,13 @@ export default function PutUpScreen() {
         if (side && side !== ourSide) {
           setOpponentTentativeId(playerId ?? null);
         }
+      })
+      .on('broadcast', { event: 'player_recycled' }, (payload) => {
+        const { playerName } = payload.payload ?? {};
+        if (playerName) setRecycleNotice(playerName as string);
+      })
+      .on('broadcast', { event: 'putup_cancel' }, () => {
+        router.replace(`/(team)/(tabs)/scoring/${matchId}/progress`);
       })
       .subscribe();
 
@@ -353,6 +411,16 @@ export default function PutUpScreen() {
   useEffect(() => {
     if (!indMatch?.home_player_id || !indMatch?.away_player_id) return;
     const timer = setTimeout(async () => {
+      // Persist racks needed now that both SLs are known
+      const hsl = indMatch.home_skill_level;
+      const asl = indMatch.away_skill_level;
+      if (hsl && asl) {
+        const [hr, ar] = getRacksNeeded(hsl, asl);
+        await supabase
+          .from('individual_matches')
+          .update({ home_racks_needed: hr, away_racks_needed: ar })
+          .eq('id', indMatch.id);
+      }
       // Mark the team match as in_progress now that scoring has begun
       await supabase
         .from('team_matches')
@@ -363,20 +431,46 @@ export default function PutUpScreen() {
       );
     }, 1500);
     return () => clearTimeout(timer);
-  }, [indMatch?.home_player_id, indMatch?.away_player_id, matchId, matchOrder]);
+  }, [indMatch?.home_player_id, indMatch?.away_player_id, indMatch?.home_skill_level, indMatch?.away_skill_level, indMatch?.id, matchId, matchOrder]);
 
   // ─── Tentatively select our player (highlights row, does not write to DB) ─
   const selectPlayer = (playerId: string) => {
     if (!indMatch || !ourSide || saving) return;
-    setTentativePlayerId(playerId);
-    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-    // Broadcast tentative selection to opponent device
     const player = roster.find(p => p.id === playerId);
-    channelRef.current?.send({
-      type: 'broadcast',
-      event: 'tentative',
-      payload: { side: ourSide, playerId, playerName: player?.name, sl: player?.skill_level ?? 0 },
-    });
+
+    const doSelect = () => {
+      setTentativePlayerId(playerId);
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+      channelRef.current?.send({
+        type: 'broadcast',
+        event: 'tentative',
+        payload: { side: ourSide, playerId, playerName: player?.name, sl: player?.skill_level ?? 0 },
+      });
+    };
+
+    if (usedPlayerIds.has(playerId)) {
+      Alert.alert(
+        'Recycling Player?',
+        `${player?.name ?? 'This player'} has already shot this session. Are you recycling this player?`,
+        [
+          { text: 'No', style: 'cancel' },
+          {
+            text: 'Yes, Recycle',
+            onPress: () => {
+              doSelect();
+              channelRef.current?.send({
+                type: 'broadcast',
+                event: 'player_recycled',
+                payload: { side: ourSide, playerName: player?.name },
+              });
+            },
+          },
+        ]
+      );
+      return;
+    }
+
+    doSelect();
   };
 
   // ─── Confirm our tentative selection → write to DB ────────────────────────
@@ -392,7 +486,7 @@ export default function PutUpScreen() {
       .from('individual_matches')
       .update({ [field]: tentativePlayerId, [skillField]: skillLevel })
       .eq('id', indMatch.id)
-      .select('id, home_player_id, away_player_id, put_up_team')
+      .select('id, home_player_id, away_player_id, put_up_team, home_skill_level, away_skill_level')
       .single();
 
     if (updated) setIndMatch(updated as IndividualMatchRecord);
@@ -412,6 +506,7 @@ export default function PutUpScreen() {
     const homeSL = homeRosterForOffline.find(p => p.id === homeId)?.skill_level ?? 3;
     const awaySL = awayRosterForOffline.find(p => p.id === awayId)?.skill_level ?? 3;
 
+    const [hr, ar] = getRacksNeeded(homeSL, awaySL);
     await supabase
       .from('individual_matches')
       .update({
@@ -419,6 +514,8 @@ export default function PutUpScreen() {
         away_player_id: awayId,
         home_skill_level: homeSL,
         away_skill_level: awaySL,
+        home_racks_needed: hr,
+        away_racks_needed: ar,
       })
       .eq('id', indMatch.id);
 
@@ -493,11 +590,13 @@ export default function PutUpScreen() {
             {roster.map(p => {
               const isTentative = tentativePlayerId === p.id && !ourConfirmedId;
               const isConfirmed = ourConfirmedId === p.id;
+              const isRecycled = usedPlayerIds.has(p.id);
               return (
                 <Pressable
                   key={p.id}
                   style={[
                     styles.sideRosterRow,
+                    isRecycled && styles.rowRecycled,
                     isTentative && styles.rowTentative,
                     isConfirmed && styles.rowConfirmed,
                   ]}
@@ -506,6 +605,9 @@ export default function PutUpScreen() {
                 >
                   <Text style={styles.sideRosterName} numberOfLines={1}>{p.name}</Text>
                   <Text style={styles.sideRosterStats}>SL {p.skill_level} · {p.matches_played}MP</Text>
+                  {isRecycled && (isTentative || isConfirmed) && (
+                    <Text style={styles.recycledBadge}>↩ Recycled</Text>
+                  )}
                   {isTentative && (
                     <Ionicons name="ellipse" size={10} color="#F59E0B" style={styles.rowIcon} />
                   )}
@@ -542,6 +644,7 @@ export default function PutUpScreen() {
             {opponentRoster.length === 0 ? (
               <Text style={styles.emptyRosterText}>Unavailable</Text>
             ) : opponentRoster.map(p => {
+              const alreadyShot = usedOpponentPlayerIds.has(p.id);
               const isTentative = opponentTentativeId === p.id && !oppConfirmedId;
               const isConfirmed = oppConfirmedId === p.id;
               return (
@@ -550,6 +653,7 @@ export default function PutUpScreen() {
                   style={[
                     styles.sideRosterRow,
                     styles.sideRosterRowReadOnly,
+                    alreadyShot && styles.rowRecycled,
                     isTentative && styles.rowTentative,
                     isConfirmed && styles.rowConfirmed,
                   ]}
@@ -668,9 +772,7 @@ export default function PutUpScreen() {
             <View style={styles.statusBanner}>
               <ActivityIndicator size="small" color={theme.colors.primary} style={{ marginRight: 8 }} />
               <Text style={styles.statusBannerText}>
-                {opponentConnected
-                  ? `Waiting for opponent to put up their player…`
-                  : 'Waiting for the other team to open the app…'}
+                Waiting for opponent to put up their player…
               </Text>
             </View>
             {renderSideBySideRosters(false)}
@@ -709,9 +811,7 @@ export default function PutUpScreen() {
             <View style={styles.statusBanner}>
               <ActivityIndicator size="small" color={theme.colors.primary} style={{ marginRight: 8 }} />
               <Text style={styles.statusBannerText}>
-                {opponentConnected
-                  ? `You put up ${ourPlayerName ?? 'your player'}. Waiting for opponent to respond…`
-                  : 'Waiting for the other team to open the app…'}
+                {`You put up ${ourPlayerName ?? 'your player'}. Waiting for opponent to respond…`}
               </Text>
             </View>
             {renderSideBySideRosters(false)}
@@ -726,11 +826,10 @@ export default function PutUpScreen() {
       <View style={styles.headerBar}>
         <Pressable
           style={styles.headerButton}
-          onPress={() => {}} // back locked during put-up
+          onPress={handleCancel}
           hitSlop={12}
-          disabled
         >
-          <Ionicons name="arrow-back" size={24} color={theme.colors.border} />
+          <Ionicons name="arrow-back" size={24} color={theme.colors.text} />
         </Pressable>
         <Pressable style={styles.headerCenter} onPress={handleDevTap} hitSlop={8}>
           <Text style={styles.headerTitle}>Match {matchOrder} of 5</Text>
@@ -740,6 +839,15 @@ export default function PutUpScreen() {
         </Pressable>
         <View style={styles.headerButton} />
       </View>
+
+      {recycleNotice && (
+        <View style={styles.recycleBanner}>
+          <Text style={styles.recycleBannerText}>♻️ Opponent is recycling {recycleNotice}</Text>
+          <Pressable onPress={() => setRecycleNotice(null)} style={styles.recycleDismiss}>
+            <Text style={styles.recycleDismissText}>OK</Text>
+          </Pressable>
+        </View>
+      )}
 
       {renderContent()}
     </SafeAreaView>
@@ -900,6 +1008,16 @@ const styles = StyleSheet.create({
     fontWeight: '500',
     marginTop: 2,
   },
+  rowRecycled: {
+    opacity: 0.55,
+    borderStyle: 'dashed',
+  },
+  recycledBadge: {
+    fontSize: 10,
+    color: theme.colors.textSecondary,
+    fontWeight: '600',
+    marginTop: 2,
+  },
   rowTentative: {
     borderColor: '#F59E0B',
     backgroundColor: '#F59E0B12',
@@ -907,6 +1025,33 @@ const styles = StyleSheet.create({
   rowConfirmed: {
     borderColor: theme.colors.primary,
     backgroundColor: theme.colors.primary + '15',
+  },
+  recycleBanner: {
+    backgroundColor: '#1B2D00',
+    borderBottomWidth: 1,
+    borderBottomColor: '#3A5C00',
+    paddingVertical: 10,
+    paddingHorizontal: 16,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  recycleBannerText: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#86EFAC',
+    flex: 1,
+  },
+  recycleDismiss: {
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 8,
+    backgroundColor: '#3A5C00',
+  },
+  recycleDismissText: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#86EFAC',
   },
   rowIcon: {
     marginTop: 4,

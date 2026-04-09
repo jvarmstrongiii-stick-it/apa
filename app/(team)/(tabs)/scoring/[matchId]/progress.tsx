@@ -72,9 +72,9 @@ export default function MatchProgressScreen() {
       const { data: ims } = await supabase
         .from('individual_matches')
         .select(
-          'id, match_order, home_player_id, away_player_id, ' +
+          'id, match_order, home_player_id, away_player_id, is_completed, ' +
           'home_skill_level, away_skill_level, ' +
-          'home_race_to, away_race_to, home_points_earned, away_points_earned, ' +
+          'home_racks_needed, away_racks_needed, home_points_earned, away_points_earned, home_racks_won, away_racks_won, ' +
           'home_player:players!home_player_id(first_name, last_name), ' +
           'away_player:players!away_player_id(first_name, last_name)'
         )
@@ -111,15 +111,17 @@ export default function MatchProgressScreen() {
           continue;
         }
 
+        const hRacks: number = row.home_racks_won ?? 0;
+        const aRacks: number = row.away_racks_won ?? 0;
         const hp: number = row.home_points_earned ?? 0;
         const ap: number = row.away_points_earned ?? 0;
-        const hr: number = row.home_race_to ?? 0;
-        const ar: number = row.away_race_to ?? 0;
-        const isComplete = hr > 0 && (hp >= hr || ap >= ar);
+        const hr: number = row.home_racks_needed ?? 0;
+        const ar: number = row.away_racks_needed ?? 0;
+        const isComplete: boolean = row.is_completed === true || (hr > 0 && (hRacks >= hr || aRacks >= ar));
 
         if (isComplete) {
           // Winner won → loser puts up next
-          nextPutUpTeam = hp >= hr ? 'away' : 'home';
+          nextPutUpTeam = hRacks >= hr ? 'away' : 'home';
         }
 
         const homeName = row.home_player

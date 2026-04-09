@@ -17,6 +17,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import * as SecureStore from 'expo-secure-store';
 import {
+  ActivityIndicator,
   Alert,
   Animated,
   Pressable,
@@ -102,6 +103,16 @@ function timeoutsForSL(sl: number): number {
   return sl <= 3 ? 2 : 1;
 }
 
+/**
+ * Live APA match point for a player.
+ * 0 = not on the hill yet, 1 = on the hill (race_to - 1), 2 = won (race_to)
+ */
+function getMatchPts(racks: number, raceTo: number): number {
+  if (racks >= raceTo)      return 2;
+  if (racks === raceTo - 1) return 1;
+  return 0;
+}
+
 const FOUL_OPTIONS: string[] = [
   'Scratch on Break',
   'Scratched',
@@ -118,6 +129,7 @@ const GAME_OVER_BREAK: GameOverOption[] = [
 
 const GAME_OVER_NORMAL_8: GameOverOption[] = [
   { label: 'Made 8 Ball',                     winner: 'current',  special: null },
+  { label: 'Pocketed 8 Ball Early',           winner: 'opponent', special: null },
   { label: 'Scratched on 8 Ball',             winner: 'opponent', special: null },
   { label: '8 Ball in Wrong Pocket',          winner: 'opponent', special: null },
   { label: 'Made 8 Ball, Pocket Not Marked',  winner: 'opponent', special: null },
@@ -127,6 +139,7 @@ const GAME_OVER_NORMAL_8: GameOverOption[] = [
 const GAME_OVER_BREAKER_RUN: GameOverOption[] = [
   { label: 'Break and Run',                   winner: 'current',  special: 'break_and_run' },
   { label: 'Made 8 Ball',                     winner: 'current',  special: null },
+  { label: 'Pocketed 8 Ball Early',           winner: 'opponent', special: null },
   { label: 'Scratched on 8 Ball',             winner: 'opponent', special: null },
   { label: '8 Ball in Wrong Pocket',          winner: 'opponent', special: null },
   { label: 'Made 8 Ball, Pocket Not Marked',  winner: 'opponent', special: null },
@@ -191,8 +204,12 @@ export default function IndividualMatchScoringScreen() {
   const [totalTimeoutsHome, setTotalTimeoutsHome] = useState(0);
   const [totalTimeoutsAway, setTotalTimeoutsAway] = useState(0);
 
-  // Lag winner — set once at the start of this individual match (null = lag not yet recorded)
-  const [lagWinner, setLagWinner] = useState<Side | null>(null);
+  // Two-device lag coordination
+  const [lagProposed, setLagProposed] = useState<Side | null>(null);
+  const [lagProposedName, setLagProposedName] = useState<string | null>(null);
+  const [lagConfirming, setLagConfirming] = useState(false);
+  const lagChannelRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
+  const timeoutChannelRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
 
   // ── Innings verification ──────────────────────────────────────────────────────
   //  After a rack ends the scorer reviews the inning count and adjusts if needed.
@@ -216,9 +233,42 @@ export default function IndividualMatchScoringScreen() {
   const timeoutFlash = useRef(new Animated.Value(1)).current;
   const timeoutFlashLoop = useRef<Animated.CompositeAnimation | null>(null);
 
+  // ── Two-device timeout sync ───────────────────────────────────────────────────
+  const [remoteTimeoutStartedAt, setRemoteTimeoutStartedAt] = useState<number | null>(null);
+  const [timeoutBtnBlinking, setTimeoutBtnBlinking] = useState(false);
+  const timeoutBtnBlink = useRef(new Animated.Value(1)).current;
+  const timeoutBtnBlinkLoop = useRef<Animated.CompositeAnimation | null>(null);
+  const timeoutBtnBlinkTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // true when this device called the timeout (not the receiver who took it over)
+  const [isTimeoutInitiator, setIsTimeoutInitiator] = useState(false);
+  // Refs so subscription callbacks always see current values
+  const timeoutBtnBlinkingRef = useRef(false);
+  const currentShooterRef = useRef<Side | null>(null);
+  const isTimeoutInitiatorRef = useRef(false);
+  const timeoutActiveRef = useRef(false);
+  const isSavingRef = useRef(false);
+
   // ── Inactivity alert (60 s no tap) ───────────────────────────────────────────
   const [inactivityVisible, setInactivityVisible] = useState(false);
   const inactivityTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const inactivityBlink = useRef(new Animated.Value(1)).current;
+  const inactivityBlinkLoop = useRef<Animated.CompositeAnimation | null>(null);
+
+  useEffect(() => {
+    if (inactivityVisible) {
+      inactivityBlink.setValue(1);
+      inactivityBlinkLoop.current = Animated.loop(
+        Animated.sequence([
+          Animated.timing(inactivityBlink, { toValue: 0.2, duration: 500, useNativeDriver: true }),
+          Animated.timing(inactivityBlink, { toValue: 1,   duration: 500, useNativeDriver: true }),
+        ])
+      );
+      inactivityBlinkLoop.current.start();
+    } else {
+      inactivityBlinkLoop.current?.stop();
+      inactivityBlink.setValue(1);
+    }
+  }, [inactivityVisible]);
 
   // ── State persistence ─────────────────────────────────────────────────────────
   // Set to true after the initial load (including any SecureStore restore) completes.
@@ -234,8 +284,17 @@ export default function IndividualMatchScoringScreen() {
         ? breakPlayer
         : breakPlayer === 'home' ? 'away' : 'home';
 
+  // Keep refs current for use inside Realtime subscription callbacks
+  currentShooterRef.current = currentShooter;
+  timeoutBtnBlinkingRef.current = timeoutBtnBlinking;
+  isTimeoutInitiatorRef.current = isTimeoutInitiator;
+  timeoutActiveRef.current = timeoutActive;
+
   const currentPlayer = currentShooter === 'home' ? homePlayer : awayPlayer;
   const currentTimeouts = currentShooter === 'home' ? timeoutsHome : timeoutsAway;
+
+  const homePts = getMatchPts(racksWonHome, homePlayer.race_to);
+  const awayPts = getMatchPts(racksWonAway, awayPlayer.race_to);
 
   const homeOnHill =
     racksWonHome === homePlayer.race_to - 1 && racksWonHome < homePlayer.race_to;
@@ -331,8 +390,6 @@ export default function IndividualMatchScoringScreen() {
 
           applyMatchData(matchDataCache);
 
-          // Restore lag winner from DB (if already set for a resumed match)
-          if (im.lag_winner) setLagWinner(im.lag_winner as Side);
 
           // Restore mid-match state if the scorer left and came back
           const savedRaw = await SecureStore.getItemAsync(`scoring-state-${im.id}`);
@@ -361,6 +418,18 @@ export default function IndividualMatchScoringScreen() {
               setActionPhase(s.actionPhase ?? 'turn');
               setPendingRackWinner(s.pendingRackWinner ?? null);
               setVerifyMyInnings(s.verifyMyInnings ?? 0);
+
+              // If we're restoring mid innings-verify, reset the verify sub-state
+              // and clear stale DB columns from the interrupted session so the
+              // subscription doesn't fire with stale values.
+              if (s.actionPhase === 'innings_verify' && im.id) {
+                setVerifySubmitted(false);
+                setVerifyPartnerCount(null);
+                setVerifyDiscrepancy(false);
+                supabase.from('individual_matches')
+                  .update({ innings_verify_home: null, innings_verify_away: null } as any)
+                  .eq('id', im.id);
+              }
             } catch {
               // Ignore corrupted snapshot — start fresh
             }
@@ -406,6 +475,15 @@ export default function IndividualMatchScoringScreen() {
               setActionPhase(s.actionPhase ?? 'turn');
               setPendingRackWinner(s.pendingRackWinner ?? null);
               setVerifyMyInnings(s.verifyMyInnings ?? 0);
+
+              if (s.actionPhase === 'innings_verify' && cached.individualMatchId) {
+                setVerifySubmitted(false);
+                setVerifyPartnerCount(null);
+                setVerifyDiscrepancy(false);
+                supabase.from('individual_matches')
+                  .update({ innings_verify_home: null, innings_verify_away: null } as any)
+                  .eq('id', cached.individualMatchId);
+              }
             }
           } catch {
             // Cache corrupt — show empty screen
@@ -478,6 +556,14 @@ export default function IndividualMatchScoringScreen() {
     if (timeoutSecsLeft <= 0) {
       setTimeoutActive(false);
       setTimeoutExpired(true);
+      // Notify other device so it can stop blinking and decrement its count
+      if (scorekeeperCount === 2) {
+        timeoutChannelRef.current?.send({
+          type: 'broadcast',
+          event: 'timeout_expired',
+          payload: {},
+        });
+      }
       timeoutFlashLoop.current = Animated.loop(
         Animated.sequence([
           Animated.timing(timeoutFlash, { toValue: 0.15, duration: 350, useNativeDriver: true }),
@@ -489,12 +575,24 @@ export default function IndividualMatchScoringScreen() {
     }
     const t = setTimeout(() => setTimeoutSecsLeft(s => s - 1), 1000);
     return () => clearTimeout(t);
-  }, [timeoutActive, timeoutSecsLeft, timeoutFlash]);
+  }, [timeoutActive, timeoutSecsLeft, timeoutFlash, scorekeeperCount]);
 
   function stopTimeoutFlash() {
     timeoutFlashLoop.current?.stop();
     timeoutFlashLoop.current = null;
     timeoutFlash.setValue(1);
+  }
+
+  function stopTimeoutBtnBlink() {
+    timeoutBtnBlinkLoop.current?.stop();
+    timeoutBtnBlinkLoop.current = null;
+    timeoutBtnBlink.setValue(1);
+    setTimeoutBtnBlinking(false);
+    setRemoteTimeoutStartedAt(null);
+    if (timeoutBtnBlinkTimer.current) {
+      clearTimeout(timeoutBtnBlinkTimer.current);
+      timeoutBtnBlinkTimer.current = null;
+    }
   }
 
   // ─── Undo helpers ─────────────────────────────────────────────────────────────
@@ -530,6 +628,15 @@ export default function IndividualMatchScoringScreen() {
   function undoLastAction() {
     if (!lastSnapshot) return;
     const s = lastSnapshot;
+    // If undoing a timeout that was active, tell the other device to stop blinking.
+    // Only the initiating device should send this — not a receiver that took over.
+    if (!s.timeoutActive && timeoutActive && scorekeeperCount === 2 && isTimeoutInitiatorRef.current) {
+      timeoutChannelRef.current?.send({
+        type: 'broadcast',
+        event: 'timeout_cancelled',
+        payload: {},
+      });
+    }
     setCurrentShooterIsBreaker(s.currentShooterIsBreaker);
     setBreakerStillAtTable(s.breakerStillAtTable);
     setIsBreakTurn(s.isBreakTurn);
@@ -562,11 +669,146 @@ export default function IndividualMatchScoringScreen() {
   // ─── Lag selection ───────────────────────────────────────────────────────────
 
   async function handleLagSelected(winner: Side) {
-    setLagWinner(winner);
     if (individualMatchId) {
-      supabase.from('individual_matches').update({ lag_winner: winner }).eq('id', individualMatchId);
+      await supabase.from('individual_matches').update({ lag_winner: winner }).eq('id', individualMatchId);
     }
     initRack(winner);
+  }
+
+  // Two-device lag ceremony channel (only active when breakPlayer === null + scorekeeperCount === 2)
+  useEffect(() => {
+    if (!individualMatchId || breakPlayer !== null || scorekeeperCount !== 2) return;
+
+    const channel = supabase
+      .channel(`lag_${individualMatchId}`, { config: { broadcast: { self: false } } })
+      .on('broadcast', { event: 'lag_proposed' }, (payload) => {
+        const { winner, playerName } = payload.payload ?? {};
+        setLagProposed(winner as Side);
+        setLagProposedName(playerName ?? null);
+      })
+      .on('broadcast', { event: 'lag_confirmed' }, (payload) => {
+        const { winner } = payload.payload ?? {};
+        if (winner) handleLagSelected(winner as Side);
+      })
+      .on('broadcast', { event: 'lag_cancelled' }, () => {
+        setLagProposed(null);
+        setLagProposedName(null);
+        setLagConfirming(false);
+      })
+      .subscribe();
+
+    lagChannelRef.current = channel;
+    return () => {
+      supabase.removeChannel(channel);
+      lagChannelRef.current = null;
+    };
+  }, [individualMatchId, breakPlayer, scorekeeperCount]);
+
+  // ─── Two-device timeout sync channel ─────────────────────────────────────────
+  useEffect(() => {
+    if (scorekeeperCount !== 2 || !individualMatchId) return;
+
+    const channel = supabase
+      .channel(`timeout_sync_${individualMatchId}`, { config: { broadcast: { self: false } } })
+      .on('broadcast', { event: 'timeout_started' }, ({ payload }) => {
+        const startedAt: number = payload.startedAt;
+        setRemoteTimeoutStartedAt(startedAt);
+        // After 5 s start blinking the Timeout button to signal the other team called it
+        timeoutBtnBlinkTimer.current = setTimeout(() => {
+          setTimeoutBtnBlinking(true);
+          timeoutBtnBlinkingRef.current = true;
+          timeoutBtnBlinkLoop.current = Animated.loop(
+            Animated.sequence([
+              Animated.timing(timeoutBtnBlink, { toValue: 0.2, duration: 400, useNativeDriver: true }),
+              Animated.timing(timeoutBtnBlink, { toValue: 1,   duration: 400, useNativeDriver: true }),
+            ])
+          );
+          timeoutBtnBlinkLoop.current.start();
+        }, 5000);
+      })
+      .on('broadcast', { event: 'timeout_expired' }, () => {
+        // Cancel the pending 5-second blink timer if it hasn't fired yet
+        if (timeoutBtnBlinkTimer.current) {
+          clearTimeout(timeoutBtnBlinkTimer.current);
+          timeoutBtnBlinkTimer.current = null;
+        }
+        if (timeoutBtnBlinkingRef.current) {
+          // Still blinking (we never pressed) — stop blink and decrement timeout count
+          stopTimeoutBtnBlink();
+          const shooter = currentShooterRef.current;
+          if (shooter === 'home') setTimeoutsHome(t => t - 1);
+          else if (shooter === 'away') setTimeoutsAway(t => t - 1);
+        }
+        // Show "TAP — TIMEOUT OVER" banner (works whether device 2 acknowledged or not)
+        setTimeoutActive(false);
+        setTimeoutExpired(true);
+        timeoutFlash.setValue(1);
+        timeoutFlashLoop.current = Animated.loop(
+          Animated.sequence([
+            Animated.timing(timeoutFlash, { toValue: 0.15, duration: 350, useNativeDriver: true }),
+            Animated.timing(timeoutFlash, { toValue: 1,   duration: 350, useNativeDriver: true }),
+          ])
+        );
+        timeoutFlashLoop.current.start();
+        setRemoteTimeoutStartedAt(null);
+      })
+      .on('broadcast', { event: 'timeout_cancelled' }, () => {
+        if (timeoutBtnBlinkTimer.current) {
+          clearTimeout(timeoutBtnBlinkTimer.current);
+          timeoutBtnBlinkTimer.current = null;
+        }
+        stopTimeoutBtnBlink();
+        setRemoteTimeoutStartedAt(null);
+        // If we had taken over the countdown, also cancel it and restore the count
+        if (timeoutActiveRef.current && !isTimeoutInitiatorRef.current) {
+          setTimeoutActive(false);
+          setTimeoutExpired(false);
+          stopTimeoutFlash();
+          setTimeoutSecsLeft(60);
+          if (currentShooterRef.current === 'home') setTimeoutsHome(t => t + 1);
+          else if (currentShooterRef.current === 'away') setTimeoutsAway(t => t + 1);
+          setIsTimeoutInitiator(false);
+        }
+      })
+      .subscribe();
+
+    timeoutChannelRef.current = channel;
+    return () => {
+      channel.unsubscribe();
+      timeoutChannelRef.current = null;
+      if (timeoutBtnBlinkTimer.current) {
+        clearTimeout(timeoutBtnBlinkTimer.current);
+        timeoutBtnBlinkTimer.current = null;
+      }
+    };
+  }, [scorekeeperCount, individualMatchId]);
+
+  function handleLagPropose(winner: Side) {
+    const playerName = winner === 'home' ? homePlayer.name : awayPlayer.name;
+    setLagConfirming(true);
+    lagChannelRef.current?.send({
+      type: 'broadcast',
+      event: 'lag_proposed',
+      payload: { winner, playerName },
+    });
+  }
+
+  async function handleLagConfirm() {
+    if (!lagProposed) return;
+    const winner = lagProposed;
+    setLagProposed(null);
+    setLagProposedName(null);
+    lagChannelRef.current?.send({
+      type: 'broadcast',
+      event: 'lag_confirmed',
+      payload: { winner },
+    });
+    handleLagSelected(winner);
+  }
+
+  function handleLagCancel() {
+    setLagConfirming(false);
+    lagChannelRef.current?.send({ type: 'broadcast', event: 'lag_cancelled', payload: {} });
   }
 
   function initRack(breaker: Side) {
@@ -577,6 +819,7 @@ export default function IndividualMatchScoringScreen() {
     setRackInnings(0);
     setTimeoutsHome(timeoutsForSL(homePlayer.skill_level));
     setTimeoutsAway(timeoutsForSL(awayPlayer.skill_level));
+    setIsTimeoutInitiator(false);
     setActionPhase('turn');
     setTimeoutActive(false);
     setTimeoutExpired(false);
@@ -622,23 +865,42 @@ export default function IndividualMatchScoringScreen() {
   }
 
   function handleTimeout() {
+    // Don't let this device start a timeout while a remote timeout is in progress
+    // (covers the window before the 5-second blink timer fires)
+    if (remoteTimeoutStartedAt !== null) return;
     if (currentTimeouts <= 0) {
       Alert.alert('No Timeouts Left', `${currentPlayer.name} has no timeouts remaining this rack.`);
       return;
     }
     saveSnapshot();
+    setIsTimeoutInitiator(true);
     if (currentShooter === 'home') setTimeoutsHome(t => t - 1);
     else setTimeoutsAway(t => t - 1);
     setTimeoutSecsLeft(60);
     setTimeoutExpired(false);
     setTimeoutActive(true);
-    resetInactivity();
+    // Don't schedule inactivity while the game is paused for a timeout.
+    // endTimeout() / dismissTimeout() will call resetInactivity() when play resumes.
+    if (inactivityTimer.current) clearTimeout(inactivityTimer.current);
+    setInactivityVisible(false);
+    // Notify other device so its Timeout button blinks after 5 s
+    if (scorekeeperCount === 2) {
+      timeoutChannelRef.current?.send({
+        type: 'broadcast',
+        event: 'timeout_started',
+        payload: { startedAt: Date.now() },
+      });
+    }
   }
 
   function endTimeout() {
     setTimeoutActive(false);
     setTimeoutSecsLeft(60);
     resetInactivity();
+    // Notify device 2 to show "TAP — TIMEOUT OVER" banner
+    if (scorekeeperCount === 2) {
+      timeoutChannelRef.current?.send({ type: 'broadcast', event: 'timeout_expired', payload: {} });
+    }
   }
 
   function cancelTimeout() {
@@ -650,6 +912,23 @@ export default function IndividualMatchScoringScreen() {
     stopTimeoutFlash();
     setTimeoutExpired(false);
     resetInactivity();
+  }
+
+  /** Called when the other device's blinking Timeout button is tapped. */
+  function handleRemoteTimeout() {
+    if (!remoteTimeoutStartedAt) return;
+    const elapsed = Math.floor((Date.now() - remoteTimeoutStartedAt) / 1000);
+    const remaining = Math.max(0, 60 - elapsed);
+    stopTimeoutBtnBlink();
+    saveSnapshot();
+    setIsTimeoutInitiator(false);
+    if (currentShooter === 'home') setTimeoutsHome(t => t - 1);
+    else setTimeoutsAway(t => t - 1);
+    setTimeoutSecsLeft(remaining);
+    setTimeoutExpired(false);
+    setTimeoutActive(true);
+    if (inactivityTimer.current) clearTimeout(inactivityTimer.current);
+    setInactivityVisible(false);
   }
 
   function handleFoul(_foulType: string) {
@@ -812,7 +1091,9 @@ export default function IndividualMatchScoringScreen() {
       .from('individual_matches')
       .update({ innings_verify_home: agreedCount, innings_verify_away: agreedCount } as any)
       .eq('id', individualMatchId);
-    // Realtime will fire and both devices will call confirmInnings(agreedCount)
+    // Advance this device immediately — don't wait for the Realtime bounce.
+    // The other device's innings_verify subscription will still fire and advance it too.
+    confirmInnings(agreedCount);
   }
 
   // ─── Follower mode: Realtime subscription ────────────────────────────────────
@@ -867,6 +1148,8 @@ export default function IndividualMatchScoringScreen() {
   // ─── Save & navigate ─────────────────────────────────────────────────────────
 
   async function saveAndNavigate(finalHome: number, finalAway: number, inningsOverride?: number, tHome?: number, tAway?: number) {
+    if (isSavingRef.current) return;
+    isSavingRef.current = true;
     const innings = inningsOverride ?? totalInnings;
     const timeoutsHomeFinal = tHome ?? totalTimeoutsHome;
     const timeoutsAwayFinal = tAway ?? totalTimeoutsAway;
@@ -889,6 +1172,8 @@ export default function IndividualMatchScoringScreen() {
           const { error } = await supabase
             .from('individual_matches')
             .update({
+              home_racks_won: finalHome,
+              away_racks_won: finalAway,
               home_points_earned: finalHome,
               away_points_earned: finalAway,
               innings,
@@ -988,14 +1273,53 @@ export default function IndividualMatchScoringScreen() {
               Waiting for the primary scorekeeper to start the lag…
             </Text>
           </View>
+        ) : lagConfirming ? (
+          // STATE 1: This device proposed — waiting for other to confirm
+          <View style={styles.lagContainer}>
+            <ActivityIndicator size="large" color={theme.colors.primary} />
+            <Text style={styles.lagTitle}>Waiting for confirmation…</Text>
+            <Text style={styles.lagBody}>
+              Waiting for the other scorekeeper to confirm.
+            </Text>
+            <Pressable onPress={handleLagCancel} style={styles.lagCancelLink}>
+              <Text style={styles.lagCancelText}>Cancel — select again</Text>
+            </Pressable>
+          </View>
+
+        ) : lagProposed ? (
+          // STATE 2: Other device proposed — this device confirms
+          <View style={styles.lagContainer}>
+            <Text style={styles.lagTitle}>Confirm Lag Winner</Text>
+            <Text style={styles.lagBody}>
+              Other scorekeeper says {lagProposedName ?? 'a player'} won the lag.
+            </Text>
+            <Pressable
+              style={({ pressed }) => [styles.lagBtn, styles.lagBtnConfirm, pressed && styles.pressed]}
+              onPress={handleLagConfirm}
+            >
+              <Text style={styles.lagBtnName}>✓ Confirm — {lagProposedName ?? ''}</Text>
+            </Pressable>
+            <Pressable
+              style={({ pressed }) => [styles.lagCancelLink, pressed && styles.pressed]}
+              onPress={() => {
+                setLagProposed(null);
+                setLagProposedName(null);
+                lagChannelRef.current?.send({ type: 'broadcast', event: 'lag_cancelled', payload: {} });
+              }}
+            >
+              <Text style={styles.lagCancelText}>Select a different player</Text>
+            </Pressable>
+          </View>
+
         ) : (
+          // STATE 3: Initial — both player buttons
           <View style={styles.lagContainer}>
             <Text style={styles.lagTitle}>Who won the lag?</Text>
             <Text style={styles.lagBody}>The lag winner breaks first.</Text>
 
             <Pressable
               style={({ pressed }) => [styles.lagBtn, pressed && styles.pressed]}
-              onPress={() => handleLagSelected('home')}
+              onPress={() => scorekeeperCount === 2 ? handleLagPropose('home') : handleLagSelected('home')}
             >
               <Text style={styles.lagBtnName}>{homePlayer.name}</Text>
               <Text style={styles.lagBtnSub}>Home · SL {homePlayer.skill_level}</Text>
@@ -1003,7 +1327,7 @@ export default function IndividualMatchScoringScreen() {
 
             <Pressable
               style={({ pressed }) => [styles.lagBtn, pressed && styles.pressed]}
-              onPress={() => handleLagSelected('away')}
+              onPress={() => scorekeeperCount === 2 ? handleLagPropose('away') : handleLagSelected('away')}
             >
               <Text style={styles.lagBtnName}>{awayPlayer.name}</Text>
               <Text style={styles.lagBtnSub}>Away · SL {awayPlayer.skill_level}</Text>
@@ -1068,7 +1392,8 @@ export default function IndividualMatchScoringScreen() {
 
         {/* Center score */}
         <View style={styles.sbCenter}>
-          <Text style={styles.sbScore}>{racksWonHome} – {racksWonAway}</Text>
+          <Text style={styles.sbInnings}>Inn: {totalInnings}</Text>
+          <Text style={styles.sbScore}>{homePts} – {awayPts}</Text>
           <Text style={styles.sbInnings}>Inn: {rackInnings}</Text>
           <Text style={styles.sbDefensive}>Def {defShotsHome} | {defShotsAway}</Text>
         </View>
@@ -1113,12 +1438,14 @@ export default function IndividualMatchScoringScreen() {
                 >
                   <Text style={styles.timeoutDismissText}>TIMEOUT FINISHED</Text>
                 </Pressable>
-                <Pressable
-                  style={({ pressed }) => [styles.timeoutCancelBtn, pressed && styles.pressed]}
-                  onPress={cancelTimeout}
-                >
-                  <Text style={styles.timeoutCancelText}>Cancel</Text>
-                </Pressable>
+                {isTimeoutInitiator && (
+                  <Pressable
+                    style={({ pressed }) => [styles.timeoutCancelBtn, pressed && styles.pressed]}
+                    onPress={cancelTimeout}
+                  >
+                    <Text style={styles.timeoutCancelText}>Cancel</Text>
+                  </Pressable>
+                )}
               </View>
             </View>
           ) : (
@@ -1136,7 +1463,7 @@ export default function IndividualMatchScoringScreen() {
 
       {/* ── Inactivity alert ── */}
       {inactivityVisible && (
-        <View style={styles.inactivityBanner}>
+        <Animated.View style={[styles.inactivityBanner, { opacity: inactivityBlink }]}>
           <Text style={styles.inactivityText}>⚠️ Scorekeeper — still active?</Text>
           <Pressable
             style={({ pressed }) => [styles.inactivityDismiss, pressed && styles.pressed]}
@@ -1144,7 +1471,7 @@ export default function IndividualMatchScoringScreen() {
           >
             <Text style={styles.inactivityDismissText}>Dismiss</Text>
           </Pressable>
-        </View>
+        </Animated.View>
       )}
 
       {/* ── Action area ── */}
@@ -1201,22 +1528,30 @@ export default function IndividualMatchScoringScreen() {
               <Text style={styles.actBtnText}>Defensive Shot</Text>
             </Pressable>
 
-            <Pressable
-              style={({ pressed }) => [
-                styles.actBtn,
-                styles.actBtnTimeout,
-                currentTimeouts === 0 && styles.actBtnDisabled,
-                pressed && styles.pressed,
-              ]}
-              onPress={() => { resetInactivity(); handleTimeout(); }}
-            >
-              <Text style={[styles.actBtnText, currentTimeouts === 0 && styles.actBtnTextDimmed]}>
-                {currentTimeouts > 0 ? `Time Out (${currentTimeouts})` : 'Time Out'}
-              </Text>
-              {currentTimeouts === 0 && (
-                <Text style={styles.noTimeoutsHint}>None Left</Text>
-              )}
-            </Pressable>
+            <Animated.View style={{ opacity: timeoutBtnBlinking ? timeoutBtnBlink : 1 }}>
+              <Pressable
+                style={({ pressed }) => [
+                  styles.actBtn,
+                  styles.actBtnTimeout,
+                  !timeoutBtnBlinking && currentTimeouts === 0 && styles.actBtnDisabled,
+                  pressed && styles.pressed,
+                ]}
+                onPress={() => {
+                  resetInactivity();
+                  if (timeoutBtnBlinking) handleRemoteTimeout();
+                  else handleTimeout();
+                }}
+              >
+                <Text style={[styles.actBtnText, !timeoutBtnBlinking && currentTimeouts === 0 && styles.actBtnTextDimmed]}>
+                  {timeoutBtnBlinking
+                    ? 'OTHER TEAM TIMEOUT'
+                    : currentTimeouts > 0 ? `Time Out (${currentTimeouts})` : 'Time Out'}
+                </Text>
+                {!timeoutBtnBlinking && currentTimeouts === 0 && (
+                  <Text style={styles.noTimeoutsHint}>None Left</Text>
+                )}
+              </Pressable>
+            </Animated.View>
 
             <Pressable
               style={({ pressed }) => [styles.actBtn, styles.actBtnFoul, pressed && styles.pressed]}
@@ -1610,6 +1945,19 @@ const styles = StyleSheet.create({
   lagBtnSub: {
     fontSize: 14,
     color: theme.colors.textSecondary,
+  },
+  lagBtnConfirm: {
+    borderColor: theme.colors.success,
+    backgroundColor: theme.colors.success + '18',
+  },
+  lagCancelLink: {
+    marginTop: 16,
+    paddingVertical: 8,
+  },
+  lagCancelText: {
+    fontSize: 13,
+    color: theme.colors.textSecondary,
+    textDecorationLine: 'underline',
   },
 
   // ── Scoreboard ──

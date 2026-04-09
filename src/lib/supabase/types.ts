@@ -284,19 +284,19 @@ export type Database = {
       }
       individual_matches: {
         Row: {
-          away_games_won: number
+          away_racks_won: number
           away_player_id: string | null
           away_points_earned: number
-          away_race_to: number | null
+          away_racks_needed: number | null
           away_skill_level: number | null
           completed_at: string | null
           created_at: string
           defensive_shots: number
           game_format: Database["public"]["Enums"]["game_format"]
-          home_games_won: number
+          home_racks_won: number
           home_player_id: string | null
           home_points_earned: number
-          home_race_to: number | null
+          home_racks_needed: number | null
           home_skill_level: number | null
           id: string
           innings: number
@@ -308,19 +308,19 @@ export type Database = {
           updated_at: string
         }
         Insert: {
-          away_games_won?: number
+          away_racks_won?: number
           away_player_id?: string | null
           away_points_earned?: number
-          away_race_to?: number | null
+          away_racks_needed?: number | null
           away_skill_level?: number | null
           completed_at?: string | null
           created_at?: string
           defensive_shots?: number
           game_format: Database["public"]["Enums"]["game_format"]
-          home_games_won?: number
+          home_racks_won?: number
           home_player_id?: string | null
           home_points_earned?: number
-          home_race_to?: number | null
+          home_racks_needed?: number | null
           home_skill_level?: number | null
           id?: string
           innings?: number
@@ -332,19 +332,19 @@ export type Database = {
           updated_at?: string
         }
         Update: {
-          away_games_won?: number
+          away_racks_won?: number
           away_player_id?: string | null
           away_points_earned?: number
-          away_race_to?: number | null
+          away_racks_needed?: number | null
           away_skill_level?: number | null
           completed_at?: string | null
           created_at?: string
           defensive_shots?: number
           game_format?: Database["public"]["Enums"]["game_format"]
-          home_games_won?: number
+          home_racks_won?: number
           home_player_id?: string | null
           home_points_earned?: number
-          home_race_to?: number | null
+          home_racks_needed?: number | null
           home_skill_level?: number | null
           id?: string
           innings?: number
@@ -827,10 +827,12 @@ export type Database = {
         Row: {
           away_score: number
           away_team_id: string
+          coin_flip_done: boolean
           created_at: string
           division_id: string
           finalized_at: string | null
           finalized_by: string | null
+          first_put_up_team: string | null
           game_format: Database["public"]["Enums"]["game_format"]
           home_score: number
           home_team_id: string
@@ -846,10 +848,12 @@ export type Database = {
         Insert: {
           away_score?: number
           away_team_id: string
+          coin_flip_done?: boolean
           created_at?: string
           division_id: string
           finalized_at?: string | null
           finalized_by?: string | null
+          first_put_up_team?: string | null
           game_format: Database["public"]["Enums"]["game_format"]
           home_score?: number
           home_team_id: string
@@ -865,10 +869,12 @@ export type Database = {
         Update: {
           away_score?: number
           away_team_id?: string
+          coin_flip_done?: boolean
           created_at?: string
           division_id?: string
           finalized_at?: string | null
           finalized_by?: string | null
+          first_put_up_team?: string | null
           game_format?: Database["public"]["Enums"]["game_format"]
           home_score?: number
           home_team_id?: string

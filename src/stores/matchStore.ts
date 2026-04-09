@@ -165,8 +165,8 @@ export const useMatchStore = create<MatchStore>()(
           if (ebState) {
             syncPayload = {
               ...syncPayload,
-              home_games_won: ebState.homeGamesWon,
-              away_games_won: ebState.awayGamesWon,
+              home_racks_won: ebState.homeGamesWon,
+              away_racks_won: ebState.awayGamesWon,
               innings: ebState.innings,
               defensive_shots: ebState.defensiveShots,
             };
@@ -228,8 +228,8 @@ export const useMatchStore = create<MatchStore>()(
             data: {
               id: matchId,
               is_completed: true,
-              home_games_won: updated.homeGamesWon,
-              away_games_won: updated.awayGamesWon,
+              home_racks_won: updated.homeGamesWon,
+              away_racks_won: updated.awayGamesWon,
             },
             primaryKey: matchId,
           });

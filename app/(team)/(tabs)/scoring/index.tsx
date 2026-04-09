@@ -194,7 +194,7 @@ export default function TeamScoringIndex() {
   const [pendingMatchIds, setPendingMatchIds] = useState<Set<string>>(new Set());
 
   const handleScheduledPress = (matchId: string) => {
-    router.push(`/(team)/(tabs)/scoring/${matchId}/coin-flip`);
+    router.push(`/(team)/(tabs)/scoring/${matchId}/first-match-check`);
   };
 
   const handleResetMatch = (matchId: string) => {
@@ -210,8 +210,16 @@ export default function TeamScoringIndex() {
             await supabase.from('individual_matches').delete().eq('team_match_id', matchId);
             await supabase
               .from('team_matches')
-              .update({ status: 'scheduled', home_score: 0, away_score: 0, finalized_by: null, finalized_at: null })
+              .update({ status: 'scheduled', home_score: 0, away_score: 0, finalized_by: null, finalized_at: null, coin_flip_done: false, coin_flip_winner: null, first_put_up_team: null })
               .eq('id', matchId);
+            // Notify any device stuck on the backfill screen to reset
+            const resetCh = supabase.channel(`backfill_${matchId}`);
+            resetCh.subscribe((status) => {
+              if (status === 'SUBSCRIBED') {
+                resetCh.send({ type: 'broadcast', event: 'match_reset', payload: {} });
+                setTimeout(() => resetCh.unsubscribe(), 2000);
+              }
+            });
             fetchScorableMatches();
           },
         },
